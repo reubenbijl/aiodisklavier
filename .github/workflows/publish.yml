@@ -1,0 +1,40 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/aiodisklavier
+    permissions:
+      # Required for PyPI trusted publishing; no API token is stored in the repo.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      # The release tag is typed by hand; __version__ is the single source of truth that
+      # pyproject.toml reads. Catch a mismatch here, before it becomes an immutable PyPI
+      # release under a version nobody tagged.
+      - name: Check the tag matches __version__
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(python -c "import pathlib, re; print(re.search(r'__version__ = \"(.*?)\"', pathlib.Path('aiodisklavier/__init__.py').read_text()).group(1))")
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::release tag '$TAG' does not match __version__ '$version'"
+            exit 1
+          fi
+      - run: python -m build
+      - run: twine check dist/*
+      - uses: pypa/gh-action-pypi-publish@release/v1

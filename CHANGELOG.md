@@ -1,0 +1,46 @@
+# Changelog
+
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] — 2026-08-15
+
+First release. Async client for the Yamaha Disklavier ENSPIRE local HTTP API, developed
+against firmware 5.24.00 on an ENSPIRE PRO grand.
+
+### Added
+
+- `Disklavier` client covering state, transport, volume, power, quiet mode, repeat and
+  shuffle, library browsing, radio, and one-shot notifications.
+- Typed models — `StaticInfo`, `CurrentInfo`, `MasterState`, `PlaybackSnapshot`, `Song`,
+  `Album`, `Playlist`, `RadioChannel` — that convert the firmware's string-encoded numbers
+  once, so callers never have to.
+- `async_notify`, with `async_snapshot_playback` and `async_restore_playback`, for playing a
+  one-shot notification and putting the piano back as it was.
+- `async_play_test_chord`, which sounds a C major triad without touching the sequencer.
+- Enumerations mirroring the firmware exactly: `PowerStatus`, `PlaybackStatus`, `QuietMode`,
+  `SongGroup`, `PlaylistGroup`, `Genre`, `GenreSelect`, `RepeatMode`.
+- PEP 561 `py.typed` marker, so type hints reach consumers.
+
+### Notes on firmware behaviour
+
+These shaped the API and are documented in `docs/enspire-api.md`:
+
+- Targets the versioned open API at `/api/1.0/<command>`, rather than the `/api/api.php`
+  spelling of the same surface. The two were verified equivalent down to their error codes.
+- There is no stop state — `stop` reports as `pause` at position zero, exposed as
+  `CurrentInfo.is_stopped`.
+- `power_status` has a transitional `wakeup` value lasting roughly twelve seconds, during
+  which the piano ignores commands.
+- Empty libraries arrive as an error envelope inside HTTP 200.
+- List responses switch between `song_list` and `item_list` depending on the group.
+- State files can be read mid-rewrite and come back truncated, or carry a trailing NUL. Reads
+  retry; the NUL is stripped rather than retried.
+- Restoring playback stops first, because `load_song` changes the sequencer's selection
+  without halting what is currently sounding.
+
+[Unreleased]: https://github.com/reubenbijl/aiodisklavier/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/reubenbijl/aiodisklavier/releases/tag/v0.1.0

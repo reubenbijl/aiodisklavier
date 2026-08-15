@@ -1,0 +1,131 @@
+[build-system]
+# 77 is the first release to accept the PEP 639 `license` / `license-files` pair.
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aiodisklavier"
+# Single-sourced from aiodisklavier.__version__, so the tag, the package and the
+# PyPI release can never disagree.
+dynamic = ["version"]
+description = "Async client for the Yamaha Disklavier ENSPIRE local HTTP API"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Reuben Bijl" }]
+keywords = ["yamaha", "disklavier", "enspire", "piano", "home-assistant"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Framework :: AsyncIO",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Home Automation",
+  "Typing :: Typed",
+]
+dependencies = ["aiohttp>=3.9", "yarl>=1.9"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-cov>=5"]
+lint = ["ruff>=0.6", "mypy>=1.11"]
+dev = ["aiodisklavier[test,lint]"]
+
+[project.urls]
+Homepage = "https://github.com/reubenbijl/aiodisklavier"
+Changelog = "https://github.com/reubenbijl/aiodisklavier/releases"
+Issues = "https://github.com/reubenbijl/aiodisklavier/issues"
+"Protocol reference" = "https://github.com/reubenbijl/aiodisklavier/blob/main/docs/enspire-api.md"
+
+[tool.setuptools.dynamic]
+version = { attr = "aiodisklavier.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["aiodisklavier*"]
+
+# Ship the PEP 561 marker so consumers actually get the type hints.
+[tool.setuptools.package-data]
+aiodisklavier = ["py.typed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Set explicitly rather than inherited: pytest-asyncio warns when this is left to the
+# default, and the default itself is changing.
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+# Warnings are failures. A DeprecationWarning out of aiohttp is the earliest signal that
+# a future release will break this library, and it is worth hearing before users do.
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["aiodisklavier"]
+branch = true
+
+[tool.coverage.report]
+# The library is small and entirely reachable from tests; keep it that way.
+fail_under = 100
+show_missing = true
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+  "F",      # pyflakes
+  "E", "W", # pycodestyle
+  "I",      # isort
+  "UP",     # pyupgrade
+  "B",      # bugbear
+  "C4",     # comprehensions
+  "SIM",    # simplify
+  "RUF",    # ruff-specific
+  "D",      # pydocstyle
+  "ANN",    # annotations
+  "ASYNC",  # async correctness
+  "PT",     # pytest style
+  "RET",    # return simplification
+  "PTH",    # pathlib
+  "TID",    # tidy imports
+]
+ignore = [
+  "D203",    # conflicts with D211
+  "D213",    # conflicts with D212
+  "ANN401",  # Any is deliberate in the HTTP plumbing
+  # `ruff format` owns the width of code, and deliberately never reflows comments or
+  # docstrings. Gating on E501 would therefore only ever police prose by hand, so the
+  # formatter is the line-length authority here and E501 is not enforced separately.
+  "E501",
+  # Async helpers here genuinely take a caller-supplied timeout; that is the API, not an
+  # accident of not using asyncio.timeout.
+  "ASYNC109",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests document themselves through their names and docstrings; annotating every
+# fixture return adds noise without adding safety.
+"tests/*" = ["ANN001", "ANN201"]
+"examples/*" = ["T201"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+# Test bodies are exercised by running them; strict annotation adds little.
+disallow_untyped_defs = false
