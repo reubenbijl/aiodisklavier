@@ -14,7 +14,7 @@ python3 -m venv .venv
 ```bash
 .venv/bin/ruff check .
 .venv/bin/ruff format --check .
-.venv/bin/mypy aiodisklavier
+.venv/bin/mypy aiodisklavier examples
 .venv/bin/pytest --cov
 ```
 

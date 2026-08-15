@@ -2,7 +2,8 @@
 
 The piano exposes two HTTP interfaces. This client prefers the versioned open API under
 ``/api/`` and falls back to the internal ``/ctrl/`` endpoints only for the handful of
-capabilities the open API omits -- seeking and repeat/shuffle.
+capabilities the open API omits -- seeking, repeat and shuffle, the extended state
+block, library reindexing, and the test chord.
 
 Example::
 
@@ -689,6 +690,7 @@ class Disklavier:
         if volume is not None:
             previous_volume = (await self.async_get_current_info()).volume
 
+        took_over = False
         try:
             # Inside the try, so that a failure here still triggers the restore below.
             if volume is not None:
@@ -700,12 +702,23 @@ class Disklavier:
                 assert song_id is not None
                 assert group is not None
                 await self.async_play_song(song_id, group, single=True)
+            took_over = True
 
             await self._async_wait_until_finished(wait_timeout)
         finally:
             # Best-effort, and never allowed to raise: a failure here would mask whatever
             # actually went wrong above. Restoring matters because otherwise a transient
             # error strands the piano on the notification track at notification volume.
+            #
+            # Silence the piano before touching the volume: on the give-up path the
+            # notification can still be sounding, and restoring the previous -- usually
+            # louder -- volume over it would blast its tail for a round-trip. Only once
+            # the notification actually took the sequencer, though: if the play command
+            # itself failed, whatever the user already had playing is still sounding,
+            # and stopping it here would kill playback this method cannot always
+            # restore.
+            if took_over and (previous_volume is not None or snapshot is not None):
+                await self._async_try_restore(self.async_stop(), "silence")
             if previous_volume is not None:
                 await self._async_try_restore(
                     self.async_set_volume(previous_volume), "volume"

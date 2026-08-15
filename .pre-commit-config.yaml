@@ -30,4 +30,4 @@ repos:
         # Check the package as a unit; strict mode against a file at a time gives
         # different, noisier answers than CI does.
         pass_filenames: false
-        args: [aiodisklavier]
+        args: [aiodisklavier, examples]

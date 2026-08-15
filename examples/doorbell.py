@@ -47,7 +47,9 @@ async def _find_by_title(piano: Disklavier, title: str, group: SongGroup) -> Son
     for song in songs:
         if song.title.casefold() == folded:
             return song
-    available = ", ".join(s.title for s in songs) or "(library empty)"
+    # !r, like every other print of device-supplied text here: titles come from the
+    # network, and raw control characters must not reach the terminal.
+    available = ", ".join(repr(s.title) for s in songs) or "(library empty)"
     raise SystemExit(
         f"No song titled {title!r} in {group.value}.\n"
         f"Drop the file onto the share and reindex first. Present: {available}"

@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-08-15
+
+### Fixed
+
+- `async_notify` silences the piano before restoring the previous volume, so a notification
+  that outlives `wait_timeout` no longer blasts its tail at the restored — usually louder —
+  volume while the restore commands are in flight.
+- `MasterState` and `PlaybackSnapshot` tolerate `master.json` blocks that are not objects,
+  degrading to absent fields instead of raising a bare `AttributeError`.
+- The doorbell example escapes device-supplied song titles before printing them, closing a
+  terminal escape-sequence injection from a hostile device.
+
+### Changed
+
+- The README quickstart is copy-paste runnable, and a Security section states the trust
+  model: plaintext, unauthenticated HTTP on a trusted LAN.
+- CI, pre-commit and the contributor docs type-check `examples/` alongside the package.
+
+### Removed
+
+- Unused constants `PATH_DESCRIPTION`, `TEST_CHORD_SECONDS` and `PREFIX_TO_PLAYLIST_GROUP`
+  (none were exported; the latter's values had no provenance). The `"s"` → `my_songs`
+  prefix mapping is now commented as inferred rather than observed.
+
 ## [0.1.0] — 2026-08-15
 
 First release. Async client for the Yamaha Disklavier ENSPIRE local HTTP API, developed
@@ -53,5 +77,6 @@ These shaped the API and are documented in `docs/enspire-api.md`:
 - Restoring playback stops first, because `load_song` changes the sequencer's selection
   without halting what is currently sounding.
 
-[Unreleased]: https://github.com/reubenbijl/aiodisklavier/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/reubenbijl/aiodisklavier/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/reubenbijl/aiodisklavier/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/reubenbijl/aiodisklavier/releases/tag/v0.1.0

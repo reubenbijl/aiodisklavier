@@ -101,6 +101,8 @@ class FakePiano:
     command_body: str = ""
     #: HTTP status returned by the next open API command.
     command_status: int = 200
+    #: Per-command status overrides, so one command can fail while the rest work.
+    command_status_for: dict[str, int] = field(default_factory=dict)
     #: Extra headers on open API command replies, e.g. a Location for a redirect.
     command_headers: dict[str, str] = field(default_factory=dict)
     #: Body returned by /api/current_info.
@@ -108,6 +110,10 @@ class FakePiano:
     #: Raw bytes for /api/current_info, taking precedence over ``current_body``. Lets a
     #: test serve byte-exact failure shapes, like a read cut inside a multibyte character.
     current_raw: bytes | None = None
+    #: When set, /api/current_info promises a body, sends part of it, and drops the
+    #: connection. Distinct from ``current_raw`` truncation, which completes at the HTTP
+    #: level: this one fails mid-transfer.
+    drop_mid_body: bool = False
     #: Called after each current_info request, to let a test change what comes next.
     on_current_info: Callable[[], None] | None = None
     #: Seconds to stall every response, for exercising client-side timeouts.
@@ -136,8 +142,16 @@ class FakePiano:
             await self._record(request)
             return web.Response(text=dumps(STATIC_INFO_PAYLOAD))
 
-        async def current_info(request: web.Request) -> web.Response:
+        async def current_info(request: web.Request) -> web.StreamResponse:
             await self._record(request)
+            if self.drop_mid_body:
+                response = web.StreamResponse()
+                response.content_length = 1000
+                await response.prepare(request)
+                await response.write(b'{"power_status": "on"')
+                assert request.transport is not None
+                request.transport.close()
+                return response
             body = self.current_body
             raw = self.current_raw
             if self.on_current_info is not None:
@@ -152,9 +166,10 @@ class FakePiano:
 
         async def command(request: web.Request) -> web.Response:
             await self._record(request)
+            name = request.path.rpartition("/")[2]
             return web.Response(
                 text=self.command_body,
-                status=self.command_status,
+                status=self.command_status_for.get(name, self.command_status),
                 headers=self.command_headers,
             )
 
@@ -203,6 +218,7 @@ async def session() -> AsyncIterator[aiohttp.ClientSession]:
 @pytest.fixture
 async def piano(server: TestServer, session: aiohttp.ClientSession) -> Disklavier:
     """Provide a client pointed at the fake piano."""
+    assert server.port is not None
     return Disklavier(server.host, session, port=server.port)
 
 

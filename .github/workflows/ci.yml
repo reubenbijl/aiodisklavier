@@ -29,7 +29,8 @@ jobs:
       - name: ruff format
         run: ruff format --check .
       - name: mypy
-        run: mypy aiodisklavier
+        # Examples are the first thing users copy; keep them type-correct too.
+        run: mypy aiodisklavier examples
 
   test:
     name: Test (Python ${{ matrix.python-version }})

@@ -11,6 +11,7 @@ from aiodisklavier import (
     SongGroup,
 )
 from aiodisklavier import client as client_module
+from aiodisklavier.const import PATH_CURRENT_INFO
 
 from .conftest import CURRENT_INFO_PAYLOAD, FakePiano, dumps
 
@@ -194,6 +195,101 @@ async def test_notify_restores_previous_song(
         request for request in fake_piano.requests if request.path == "/ctrl/setSeq.php"
     ]
     assert seeks[-1].query["time"] == "516000"
+
+
+async def test_notify_waits_for_the_notification_to_finish(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """The restore must wait for the notification to stop sounding, not race it.
+
+    This is the behaviour the feature exists for: the fake reports 'play' for three
+    polls before flipping to 'pause', and no restore command may go out until the
+    piano has reported quiet.
+    """
+    polls = 0
+
+    def _finish_after_three() -> None:
+        nonlocal polls
+        polls += 1
+        if polls >= 3:
+            # CURRENT_INFO_PAYLOAD reports 'pause'.
+            fake_piano.current_body = dumps(CURRENT_INFO_PAYLOAD)
+
+    fake_piano.current_body = dumps({**CURRENT_INFO_PAYLOAD, "playback_status": "play"})
+    fake_piano.on_current_info = _finish_after_three
+
+    await piano.async_notify(song_id=1, group=SongGroup.BUILT_IN_SONGS)
+
+    # Three 'play' polls, then the first 'pause' poll ends the wait -- exactly four,
+    # so a loop that stopped exiting promptly (and ran to its deadline instead)
+    # cannot slip through on the ordering assertion alone.
+    assert polls == 4
+    # ...and nothing was restored until after the final poll.
+    poll_indices = [
+        index
+        for index, request in enumerate(fake_piano.requests)
+        if request.path == PATH_CURRENT_INFO
+    ]
+    load_index = next(
+        index
+        for index, request in enumerate(fake_piano.requests)
+        if request.command == "load_song"
+    )
+    assert poll_indices[-1] < load_index
+
+
+async def test_notify_timeout_silences_before_restoring_volume(
+    piano: Disklavier, fake_piano: FakePiano, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On the give-up path the piano is stopped before the volume comes back up.
+
+    When the wait deadline fires, the notification is still sounding. Restoring the
+    previous -- usually louder -- volume first would blast the notification's tail
+    for a round-trip; the stop must land before the volume does.
+    """
+    monkeypatch.setattr(client_module, "NOTIFY_POLL_INTERVAL", 0.01)
+    fake_piano.current_body = dumps({**CURRENT_INFO_PAYLOAD, "playback_status": "play"})
+
+    await piano.async_notify(
+        song_id=1, group=SongGroup.BUILT_IN_SONGS, volume=15, wait_timeout=0.05
+    )
+
+    events = [
+        (request.command, request.query.get("_v"))
+        for request in fake_piano.requests
+        if request.command in ("stop", "set_volume_main")
+    ]
+    # Down to the notification volume, then silence, then back up -- in that order.
+    assert events[0] == ("set_volume_main", "15")
+    assert events.index(("stop", None)) < events.index(("set_volume_main", "100"))
+
+
+async def test_notify_failure_before_takeover_does_not_stop_playback(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """A notification that never started must not silence what was already playing.
+
+    If the play command itself is rejected, the sequencer still holds the user's own
+    music. The silencing stop that protects the give-up path must not fire here: on a
+    ``restore=False`` call nothing would bring that playback back.
+    """
+    fake_piano.current_body = dumps({**CURRENT_INFO_PAYLOAD, "playback_status": "play"})
+    fake_piano.command_status_for = {"play_single_song": 400}
+
+    with pytest.raises(DisklavierCommandError):
+        await piano.async_notify(
+            song_id=1, group=SongGroup.BUILT_IN_SONGS, volume=15, restore=False
+        )
+
+    commands = [request.command for request in fake_piano.requests]
+    assert "stop" not in commands
+    # The volume, though, was already changed and is put back.
+    volumes = [
+        request.query["_v"]
+        for request in fake_piano.requests
+        if request.command == "set_volume_main"
+    ]
+    assert volumes == ["15", "100"]
 
 
 async def test_notify_gives_up_waiting_and_restores_anyway(

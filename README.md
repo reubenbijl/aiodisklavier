@@ -13,20 +13,28 @@ pip install aiodisklavier
 ## Use
 
 ```python
+import asyncio
+
 import aiohttp
+
 from aiodisklavier import Disklavier, SongGroup
 
-async with aiohttp.ClientSession() as session:
-    piano = Disklavier("192.168.1.50", session)
 
-    info = await piano.async_get_current_info()
-    print(info.song_title, info.playback_status, info.position_seconds)
+async def main() -> None:
+    async with aiohttp.ClientSession() as session:
+        piano = Disklavier("192.168.1.50", session)
 
-    # Fuzzy title search runs on the piano itself.
-    await piano.async_play_search("Clair de lune")
+        info = await piano.async_get_current_info()
+        print(info.song_title, info.playback_status, info.position_seconds)
 
-    # Play one song and stop, rather than continuing through the library.
-    await piano.async_play_song(24, SongGroup.DOWNLOADED_SONGS, single=True)
+        # Fuzzy title search runs on the piano itself.
+        await piano.async_play_search("Clair de lune")
+
+        # Play one song and stop, rather than continuing through the library.
+        await piano.async_play_song(24, SongGroup.DOWNLOADED_SONGS, single=True)
+
+
+asyncio.run(main())
 ```
 
 Finding the piano is a plain SSDP `M-SEARCH` for `urn:schemas-upnp-org:device:Disklavier:1`; the library exposes that device type as `UPNP_DEVICE_TYPE`.
@@ -76,14 +84,23 @@ full reasoning, with provenance for every claim, is in
 The piano exposes a versioned open API at `/api/1.0/<command>` and an internal, unversioned
 set of endpoints under `/ctrl/` that its own web UI drives. This library uses the open API
 wherever possible and drops to `/ctrl/` only for what the open API cannot do: seeking, repeat
-and shuffle, the extended state block, reindexing, and the test chord. Both funnel XML into
-the same Unix socket inside the piano.
+and shuffle, the extended state block, reindexing, and the test chord.
 
 The open API takes some finding: nothing the piano normally serves links to it, and neither
 the phone app nor the piano's own web UI calls it. The one client-side trail is
 `/ctrl/api_test.html`, a test harness Yamaha ships on the device — that is where the
 `/api/1.0/` form is visible. `/api/api.php?_com=<command>` is the same surface by another
 name, verified equivalent down to the error codes.
+
+## Security
+
+The piano's API is plaintext HTTP with no authentication (unless a passcode is set on the
+piano), and SSDP discovery answers are unauthenticated multicast — any host on the LAN can
+observe or impersonate the piano. The client hardens itself against a hostile device:
+response bodies are read against a size ceiling, redirects are refused, and device-supplied
+strings are treated as data. The transport itself still has no confidentiality or
+integrity, so keep this traffic on a trusted network and do not expose the piano or this
+client across an untrusted one.
 
 ## Development
 

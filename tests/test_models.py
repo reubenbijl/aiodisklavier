@@ -7,6 +7,7 @@ import pytest
 from aiodisklavier import (
     CurrentInfo,
     MasterState,
+    PlaybackSnapshot,
     PlaybackStatus,
     PowerStatus,
     QuietMode,
@@ -123,6 +124,23 @@ def test_master_state_tolerates_missing_blocks() -> None:
     master = MasterState.from_json({})
     assert master.repeat is None
     assert master.metronome_tempo is None
+
+
+@pytest.mark.parametrize("junk", ["nope", 3, [1, 2], True])
+def test_master_state_tolerates_non_dict_blocks(junk: object) -> None:
+    """A block that is not an object degrades like an absent one, not a crash.
+
+    master.json is internal and unversioned, so its shape is the one most likely to
+    drift across firmware; a string where an object was expected must not raise.
+    """
+    master = MasterState.from_json({"piano": junk, "sbc": junk, "seq": junk})
+    assert master.tempo is None
+    assert master.headphone_connected is None
+    assert master.metronome_tempo is None
+
+    snapshot = PlaybackSnapshot.from_master_json({"seq": junk})
+    assert snapshot.has_song is False
+    assert snapshot.was_playing is False
 
 
 def test_master_state_unknown_repeat_is_none() -> None:

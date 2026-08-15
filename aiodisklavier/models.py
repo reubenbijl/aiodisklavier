@@ -12,6 +12,15 @@ from typing import Any
 from .const import PlaybackStatus, PowerStatus, QuietMode, RepeatMode
 
 
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    """Return a mapping as-is, and anything else as empty.
+
+    ``master.json`` is internal and unversioned; a block that is not the object this
+    code expects must degrade to "absent", not crash the parse.
+    """
+    return value if isinstance(value, dict) else {}
+
+
 def _int_or_none(value: Any) -> int | None:
     """Coerce a firmware value to ``int``, tolerating empty strings and junk."""
     if value is None or value == "":
@@ -176,9 +185,9 @@ class MasterState:
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> MasterState:
         """Build from a decoded ``/ctrl/master.json`` payload."""
-        piano = data.get("piano") or {}
-        sbc = data.get("sbc") or {}
-        seq = data.get("seq") or {}
+        piano = _dict_or_empty(data.get("piano"))
+        sbc = _dict_or_empty(data.get("sbc"))
+        seq = _dict_or_empty(data.get("seq"))
 
         repeat = _repeat_mode(data.get("repeat"))
 
@@ -223,7 +232,7 @@ class PlaybackSnapshot:
     @classmethod
     def from_master_json(cls, data: dict[str, Any]) -> PlaybackSnapshot:
         """Build from a decoded ``/ctrl/master.json`` payload."""
-        seq = data.get("seq") or {}
+        seq = _dict_or_empty(data.get("seq"))
         return cls(
             song_prefix=_str_or_none(seq.get("song_pfix")),
             song_id=_int_or_none(seq.get("song_id")),

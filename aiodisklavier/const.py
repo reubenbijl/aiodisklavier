@@ -24,13 +24,8 @@ PATH_CURRENT_INFO: Final = f"{PATH_API_BASE}/current_info"
 PATH_CTRL_SEQ: Final = "/ctrl/setSeq.php"
 PATH_CTRL_SONG: Final = "/ctrl/setSong.php"
 PATH_CTRL_MASTER_JSON: Final = "/ctrl/master.json"
-PATH_DESCRIPTION: Final = "/ctrl/getDescription.php"
 PATH_CTRL_PUT_NOTE_ON: Final = "/ctrl/putNoteOn.php"
 PATH_CTRL_REFRESH_DB: Final = "/ctrl/setRefreshDB.php"
-
-#: ``putNoteOn.php`` holds its chord for one second before sending note-offs, so the request
-#: blocks for at least that long.
-TEST_CHORD_SECONDS: Final = 1.0
 
 DEFAULT_PORT: Final = 80
 DEFAULT_TIMEOUT: Final = 10.0
@@ -149,16 +144,15 @@ class GenreSelect(StrEnum):
 PREFIX_TO_SONG_GROUP: Final[dict[str, SongGroup]] = {
     "d": SongGroup.BUILT_IN_SONGS,
     "l": SongGroup.BUILT_IN_PLAYLIST,
+    # "s" is inferred, not observed: the my_songs library was empty on the reference
+    # unit, so its prefix never appeared in master.json. If my_songs actually uses a
+    # different prefix, that prefix is unrecognised and restore is skipped; if "s"
+    # turns out to belong to some other library, restore would reselect into my_songs
+    # -- drop this entry if that is ever observed.
     "s": SongGroup.MY_SONGS,
     "r": SongGroup.MY_RECORDINGS,
     "f": SongGroup.PC_SHARING_FOLDER,
     "y": SongGroup.DOWNLOADED_SONGS,
-}
-
-#: The playlist libraries use their own prefixes, outside :data:`PREFIX_TO_SONG_GROUP`.
-PREFIX_TO_PLAYLIST_GROUP: Final[dict[str, PlaylistGroup]] = {
-    "l": PlaylistGroup.DEMO_PLAYLIST,
-    "p": PlaylistGroup.PLAYLISTS,
 }
 
 

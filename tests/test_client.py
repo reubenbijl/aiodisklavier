@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 
+import aiohttp
 import pytest
+from aiohttp.test_utils import TestServer
 
 from aiodisklavier import (
     Disklavier,
@@ -77,7 +80,9 @@ async def test_http_400_raises_command_error(
     ids=["songs", "albums", "songs_in_album", "playlists", "playlist_items"],
 )
 async def test_empty_library_returns_empty_list(
-    piano: Disklavier, fake_piano: FakePiano, call
+    piano: Disklavier,
+    fake_piano: FakePiano,
+    call: Callable[[Disklavier], Awaitable[list[object]]],
 ) -> None:
     """An empty library is an error envelope inside HTTP 200, translated back to [].
 
@@ -255,13 +260,44 @@ async def test_connection_failure_raises_connection_error(
 
 
 async def test_timeout_raises_connection_error(
-    server, session, fake_piano: FakePiano
+    server: TestServer, session: aiohttp.ClientSession, fake_piano: FakePiano
 ) -> None:
     """A piano that accepts the connection but never answers is a connection error."""
     fake_piano.delay = 1.0
+    assert server.port is not None
     slow = Disklavier(server.host, session, port=server.port, timeout=0.05)
     with pytest.raises(DisklavierConnectionError, match="Timeout"):
         await slow.async_get_current_info()
+
+
+@pytest.mark.parametrize("status", [500, 503])
+async def test_server_error_raises_connection_error(
+    piano: Disklavier, fake_piano: FakePiano, status: int
+) -> None:
+    """A 5xx is a transport-level fault, mapped like any other client error.
+
+    Only 400 carries firmware meaning (a rejected argument); anything else in the
+    error range is the HTTP layer misbehaving, not the piano answering.
+    """
+    fake_piano.command_status = status
+    fake_piano.command_body = "boom"
+    with pytest.raises(DisklavierConnectionError):
+        await piano.async_play()
+
+
+async def test_connection_drop_mid_body_raises_connection_error(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """A body cut off by the connection dropping is a connection error.
+
+    Distinct from the daemon's mid-write truncation, which arrives complete at the
+    HTTP level on a healthy connection and is retried: a transport that died is not
+    retried, it is reported.
+    """
+    fake_piano.drop_mid_body = True
+    with pytest.raises(DisklavierConnectionError):
+        await piano.async_get_current_info()
+    assert len(fake_piano.requests) == 1
 
 
 async def test_non_object_json_raises_response_error(
@@ -273,7 +309,7 @@ async def test_non_object_json_raises_response_error(
         await piano.async_get_current_info()
 
 
-async def test_host_property(piano: Disklavier, server) -> None:
+async def test_host_property(piano: Disklavier, server: TestServer) -> None:
     """The client exposes the host it was built with."""
     assert piano.host == server.host
 
