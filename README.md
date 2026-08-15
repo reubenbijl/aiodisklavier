@@ -58,13 +58,16 @@ full reasoning, with provenance for every claim, is in
   piano ignores commands. The HTTP API answers normally while asleep, so reachability tells
   you nothing about power state.
 - **Empty libraries are an error, not an empty list** — HTTP 200 carrying
-  `{"status": "error", "error_info": "no song"}`.
+  `{"status": "error", "error_info": "no song"}`. The browse methods translate that
+  envelope back into the empty list it denotes, so callers just see `[]`.
 - **State reads can come back truncated** while a song is playing, because the daemon
   rewrites those files in place. Reads retry automatically. Payloads may also carry a
   trailing `\n\0`, which is stripped rather than retried.
 - **State lags a command.** Reading `current_info` straight after a `load_song` or reselect
   returns the *previous* song. Allow a short settle before trusting a post-command read.
-- **While radio is playing, transport commands are silently ignored** and still return 200.
+- **Radio's interaction with transport commands is not established.** There is reason to
+  think playback behaves differently while a radio channel is playing, but it has not been
+  exercised on hardware — treat transport during radio as unknown.
 - **`async_play_test_chord` makes a sound** — a C major triad for one second. It goes to the
   MIDI daemon rather than the sequencer, so it will not disturb a loaded song.
 

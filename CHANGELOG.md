@@ -24,6 +24,16 @@ against firmware 5.24.00 on an ENSPIRE PRO grand.
 - Enumerations mirroring the firmware exactly: `PowerStatus`, `PlaybackStatus`, `QuietMode`,
   `SongGroup`, `PlaylistGroup`, `Genre`, `GenreSelect`, `RepeatMode`.
 - PEP 561 `py.typed` marker, so type hints reach consumers.
+- Browse methods translate the firmware's empty-library error envelope into the empty list
+  it denotes, and `DisklavierResponseError` carries `command` and `error_info` attributes so
+  the envelope errors that remain can be told apart without parsing messages.
+
+### Security
+
+- Response bodies are read against a 1 MiB ceiling rather than without limit, so a hostile
+  or broken device cannot stream the client's host out of memory.
+- Redirects are refused. No endpoint the client calls legitimately redirects, and following
+  one would hand the request to whatever host a spoofed device names.
 
 ### Notes on firmware behaviour
 
@@ -35,7 +45,8 @@ These shaped the API and are documented in `docs/enspire-api.md`:
   `CurrentInfo.is_stopped`.
 - `power_status` has a transitional `wakeup` value lasting roughly twelve seconds, during
   which the piano ignores commands.
-- Empty libraries arrive as an error envelope inside HTTP 200.
+- Empty libraries arrive as an error envelope inside HTTP 200; the browse methods translate
+  it back into an empty list.
 - List responses switch between `song_list` and `item_list` depending on the group.
 - State files can be read mid-rewrite and come back truncated, or carry a trailing NUL. Reads
   retry; the NUL is stripped rather than retried.

@@ -28,6 +28,7 @@ from .const import (
     DEFAULT_TIMEOUT,
     JSON_RETRY_ATTEMPTS,
     JSON_RETRY_DELAY,
+    MAX_RESPONSE_BYTES,
     NOTIFY_POLL_INTERVAL,
     NOTIFY_SETTLE,
     NOTIFY_WAIT_TIMEOUT,
@@ -76,6 +77,14 @@ _FLAG: Final = ""
 #: group returns ``item_list`` where a song group returns ``song_list``.
 _SONG_KEYS: Final = ("song_list", "item_list")
 
+#: How much to pull off the wire per read while enforcing the response-size ceiling.
+_READ_CHUNK_BYTES: Final = 64 * 1024
+
+#: ``error_info`` value the firmware uses for an empty library: HTTP 200 carrying
+#: ``{"status": "error", "error_info": "no song", "song_list": []}``. A routine browse
+#: result, not a fault, so the browse methods translate it back into the empty list.
+_EMPTY_LIBRARY_ERROR: Final = "no song"
+
 #: The daemon writes its socket payloads with a trailing ``\n\0`` terminator, and that
 #: terminator sometimes survives into the state-file responses. ``json.loads`` rejects the
 #: trailing NUL as extra data, so it is stripped -- along with ordinary whitespace -- before
@@ -116,25 +125,49 @@ class Disklavier:
     # Transport
     # ------------------------------------------------------------------
 
-    async def _get(self, path: str, params: dict[str, Any] | None = None) -> str:
-        """Perform a GET and return the body as text.
+    async def _get(self, path: str, params: dict[str, Any] | None = None) -> bytes:
+        """Perform a GET and return the raw body.
+
+        The body is returned undecoded: a state read can catch the daemon mid-write, and
+        a cut that lands inside a multibyte character must surface at the JSON layer --
+        where truncation is retried -- rather than escape from here as a stray
+        ``UnicodeDecodeError``.
 
         :raises DisklavierCommandError: the piano returned HTTP 400.
         :raises DisklavierConnectionError: the piano was unreachable or timed out.
+        :raises DisklavierResponseError: the piano redirected, or the body ran past
+            :data:`~aiodisklavier.const.MAX_RESPONSE_BYTES`.
         """
         url = self._base.with_path(path)
         try:
-            response = await self._session.get(
-                url, params=params, timeout=self._timeout
-            )
-            # The firmware signals every bad argument as a plain 400.
-            if response.status == 400:
-                raise DisklavierCommandError(
-                    f"Disklavier rejected request {url} with params {params}"
-                )
-            response.raise_for_status()
-            return await response.text()
-        except DisklavierCommandError:
+            async with self._session.get(
+                url, params=params, timeout=self._timeout, allow_redirects=False
+            ) as response:
+                # The firmware signals every bad argument as a plain 400.
+                if response.status == 400:
+                    raise DisklavierCommandError(
+                        f"Disklavier rejected request {url} with params {params}"
+                    )
+                # Nothing this client calls ever redirects, and following one would
+                # hand the request to whatever host a spoofed piano names.
+                if 300 <= response.status < 400:
+                    raise DisklavierResponseError(
+                        f"Disklavier redirected {url} unexpectedly ({response.status})"
+                    )
+                response.raise_for_status()
+                # Read incrementally against a ceiling. A plain ``read()`` would buffer
+                # whatever the device chooses to stream; real payloads top out around a
+                # few hundred kB, so past the ceiling this is not the piano talking.
+                body = bytearray()
+                while chunk := await response.content.read(_READ_CHUNK_BYTES):
+                    body += chunk
+                    if len(body) > MAX_RESPONSE_BYTES:
+                        raise DisklavierResponseError(
+                            f"Disklavier response from {url} exceeded "
+                            f"{MAX_RESPONSE_BYTES} bytes"
+                        )
+                return bytes(body)
+        except DisklavierError:
             raise
         except TimeoutError as err:
             raise DisklavierConnectionError(
@@ -153,13 +186,18 @@ class Disklavier:
         The firmware serves JSON with a ``text/html`` content type in places, so the body is
         decoded explicitly rather than relying on ``response.json()``.
         """
-        text = ""
+        raw = b""
         for attempt in range(JSON_RETRY_ATTEMPTS):
-            # Strip the daemon's ``\n\0`` terminator (and any stray whitespace) before
-            # parsing; without this a complete payload is rejected for the trailing NUL.
-            text = (await self._get(path, params)).strip(_JSON_STRIP)
             try:
-                data: Any = json.loads(text)
+                raw = await self._get(path, params)
+                # Decode and parse under one net: a read that catches the daemon
+                # mid-write can be cut inside a multibyte character just as easily as
+                # inside the JSON, and both heal the same way -- by re-reading. A
+                # ``UnicodeDecodeError`` is a ``ValueError``, so one handler covers
+                # both. The strip removes the daemon's ``\n\0`` terminator (and any
+                # stray whitespace), without which a complete payload is rejected for
+                # the trailing NUL.
+                data: Any = json.loads(raw.decode().strip(_JSON_STRIP))
             except ValueError:
                 # The state endpoints are files the daemon rewrites in place, so a read
                 # can catch one part-written. Retrying almost always gets a whole one.
@@ -180,7 +218,7 @@ class Disklavier:
 
         raise DisklavierResponseError(
             f"Disklavier returned invalid JSON from {path} after "
-            f"{JSON_RETRY_ATTEMPTS} attempts ({len(text)} bytes): {text[:200]!r}..."
+            f"{JSON_RETRY_ATTEMPTS} attempts ({len(raw)} bytes): {raw[:200]!r}..."
         )
 
     @staticmethod
@@ -192,20 +230,32 @@ class Disklavier:
         """Send an open API command that returns no body worth parsing."""
         await self._get(self._command_path(command), params)
 
-    async def _command_json(self, command: str, **params: Any) -> dict[str, Any]:
+    async def _command_json(
+        self, command: str, *, allow_empty: bool = False, **params: Any
+    ) -> dict[str, Any]:
         """Send an open API command and decode its JSON envelope.
 
-        :raises DisklavierResponseError: the envelope carried ``status`` != ``ok``. The
-            firmware reports empty libraries this way, with HTTP 200.
+        :param allow_empty: Accept the firmware's empty-library envelope -- ``status:
+            error`` with ``error_info: "no song"`` -- as a normal reply. An empty library
+            is a routine browse result the firmware happens to spell as an error, and its
+            envelope still carries the (empty) list keys.
+        :raises DisklavierResponseError: the envelope carried any other ``status`` !=
+            ``ok``. The exception's ``command`` and ``error_info`` attributes identify
+            the failure without parsing the message.
         """
         data = await self._get_json(self._command_path(command), params)
         status = data.get("status")
-        if status != "ok":
-            raise DisklavierResponseError(
-                f"Disklavier command {command!r} failed: "
-                f"{data.get('error_info') or status or 'unknown error'}"
-            )
-        return data
+        if status == "ok":
+            return data
+        error_info = data.get("error_info")
+        if allow_empty and error_info == _EMPTY_LIBRARY_ERROR:
+            return data
+        raise DisklavierResponseError(
+            f"Disklavier command {command!r} failed: "
+            f"{error_info or status or 'unknown error'}",
+            command=command,
+            error_info=error_info if isinstance(error_info, str) else None,
+        )
 
     # ------------------------------------------------------------------
     # State
@@ -429,7 +479,10 @@ class Disklavier:
 
     @staticmethod
     def _songs_from(data: dict[str, Any]) -> list[Song]:
-        """Read a song list, accepting either key the firmware might use."""
+        """Read a song list, accepting either key the firmware might use.
+
+        A null list is treated as the empty list it denotes, rather than iterated.
+        """
         for key in _SONG_KEYS:
             if key in data:
                 return [
@@ -437,29 +490,34 @@ class Disklavier:
                         song_id=int(row.get("song_id", row.get("item_id", 0))),
                         title=str(row.get("song_title", "")),
                     )
-                    for row in data[key]
+                    for row in data[key] or []
                 ]
         return []
 
     async def async_get_songs(self, group: SongGroup) -> list[Song]:
         """List the songs in a library.
 
-        :raises DisklavierResponseError: the library is empty. The firmware reports this as
-            ``status: error`` with ``error_info: "no song"``.
+        An empty library returns an empty list. The firmware reports it as ``status:
+        error`` with ``error_info: "no song"``; that envelope is translated back into
+        the empty result it denotes rather than raised.
         """
         return self._songs_from(
-            await self._command_json("get_song_list", group=group.value)
+            await self._command_json(
+                "get_song_list", allow_empty=True, group=group.value
+            )
         )
 
     async def async_get_albums(self, group: SongGroup) -> list[Album]:
         """List the albums in a library."""
-        data = await self._command_json("get_album_list", group=group.value)
+        data = await self._command_json(
+            "get_album_list", allow_empty=True, group=group.value
+        )
         return [
             Album(
                 album_id=int(row.get("album_id", 0)),
                 title=str(row.get("album_title", "")),
             )
-            for row in data.get("album_list", [])
+            for row in data.get("album_list") or []
         ]
 
     async def async_get_songs_in_album(
@@ -468,19 +526,24 @@ class Disklavier:
         """List the songs within an album."""
         return self._songs_from(
             await self._command_json(
-                "get_song_list_in_album", group=group.value, album_id=str(album_id)
+                "get_song_list_in_album",
+                allow_empty=True,
+                group=group.value,
+                album_id=str(album_id),
             )
         )
 
     async def async_get_playlists(self, group: PlaylistGroup) -> list[Playlist]:
         """List the playlists in a library."""
-        data = await self._command_json("get_playlist_list", group=group.value)
+        data = await self._command_json(
+            "get_playlist_list", allow_empty=True, group=group.value
+        )
         return [
             Playlist(
                 playlist_id=int(row.get("playlist_id", 0)),
                 title=str(row.get("playlist_title", "")),
             )
-            for row in data.get("playlist_list", [])
+            for row in data.get("playlist_list") or []
         ]
 
     async def async_get_playlist_items(
@@ -490,6 +553,7 @@ class Disklavier:
         return self._songs_from(
             await self._command_json(
                 "get_item_list_in_playlist",
+                allow_empty=True,
                 group=group.value,
                 playlist_id=str(playlist_id),
             )
@@ -514,7 +578,8 @@ class Disklavier:
     async def async_get_radio_channels(self) -> list[RadioChannel]:
         """List DisklavierRadio channels.
 
-        Not available in the Japan region, where the piano answers with an error envelope.
+        Where the service is unavailable, the piano answers with an error envelope; the
+        raised :class:`DisklavierResponseError` carries the envelope's ``error_info``.
         """
         data = await self._command_json("get_radio_channel_list")
         return [
@@ -522,14 +587,15 @@ class Disklavier:
                 channel_id=int(row.get("channel_id", 0)),
                 title=str(row.get("channel_title", "")),
             )
-            for row in data.get("channel_list", [])
+            for row in data.get("channel_list") or []
         ]
 
     async def async_play_radio(self, channel_id: int) -> None:
         """Start a radio channel.
 
-        While radio is playing the firmware silently ignores transport and playback
-        commands -- they still return HTTP 200 but do nothing.
+        Whether transport and playback commands are honoured while radio is playing has
+        not been established on hardware -- treat their behaviour during radio as
+        unknown. See the "Not established" notes in ``docs/enspire-api.md``.
         """
         await self._command("play_radio", channel_id=str(channel_id))
 

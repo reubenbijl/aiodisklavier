@@ -35,6 +35,11 @@ TEST_CHORD_SECONDS: Final = 1.0
 DEFAULT_PORT: Final = 80
 DEFAULT_TIMEOUT: Final = 10.0
 
+#: Upper bound on a response body, in bytes. The largest payload the piano actually serves
+#: is a full song list at a few hundred kB, so anything past this is not the piano talking.
+#: Reads stop here rather than letting a hostile or broken device stream without limit.
+MAX_RESPONSE_BYTES: Final = 1024 * 1024
+
 # The state endpoints are files the control daemon rewrites in place, so a read can catch
 # one mid-write and come back truncated. Observed on 5.24.00 against /api/current_info.
 # These reads are idempotent, so a short retry is safe and cheaper than surfacing a fault.

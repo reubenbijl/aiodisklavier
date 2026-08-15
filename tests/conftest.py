@@ -101,8 +101,13 @@ class FakePiano:
     command_body: str = ""
     #: HTTP status returned by the next open API command.
     command_status: int = 200
+    #: Extra headers on open API command replies, e.g. a Location for a redirect.
+    command_headers: dict[str, str] = field(default_factory=dict)
     #: Body returned by /api/current_info.
     current_body: str = field(default_factory=lambda: dumps(CURRENT_INFO_PAYLOAD))
+    #: Raw bytes for /api/current_info, taking precedence over ``current_body``. Lets a
+    #: test serve byte-exact failure shapes, like a read cut inside a multibyte character.
+    current_raw: bytes | None = None
     #: Called after each current_info request, to let a test change what comes next.
     on_current_info: Callable[[], None] | None = None
     #: Seconds to stall every response, for exercising client-side timeouts.
@@ -134,8 +139,11 @@ class FakePiano:
         async def current_info(request: web.Request) -> web.Response:
             await self._record(request)
             body = self.current_body
+            raw = self.current_raw
             if self.on_current_info is not None:
                 self.on_current_info()
+            if raw is not None:
+                return web.Response(body=raw)
             return web.Response(text=body)
 
         async def master_json(request: web.Request) -> web.Response:
@@ -144,7 +152,11 @@ class FakePiano:
 
         async def command(request: web.Request) -> web.Response:
             await self._record(request)
-            return web.Response(text=self.command_body, status=self.command_status)
+            return web.Response(
+                text=self.command_body,
+                status=self.command_status,
+                headers=self.command_headers,
+            )
 
         async def ctrl(request: web.Request) -> web.Response:
             await self._record(request)

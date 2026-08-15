@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from aiodisklavier import (
@@ -16,7 +18,7 @@ from aiodisklavier import (
     SongGroup,
 )
 from aiodisklavier import client as client_module
-from aiodisklavier.const import PATH_API_BASE
+from aiodisklavier.const import JSON_RETRY_ATTEMPTS, MAX_RESPONSE_BYTES, PATH_API_BASE
 
 from .conftest import CURRENT_INFO_PAYLOAD, FakePiano, dumps
 
@@ -63,15 +65,69 @@ async def test_http_400_raises_command_error(
         await piano.async_play()
 
 
-async def test_error_envelope_raises_response_error(
-    piano: Disklavier, fake_piano: FakePiano
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda p: p.async_get_songs(SongGroup.MY_RECORDINGS),
+        lambda p: p.async_get_albums(SongGroup.MY_RECORDINGS),
+        lambda p: p.async_get_songs_in_album(1, SongGroup.MY_RECORDINGS),
+        lambda p: p.async_get_playlists(PlaylistGroup.PLAYLISTS),
+        lambda p: p.async_get_playlist_items(1, PlaylistGroup.PLAYLISTS),
+    ],
+    ids=["songs", "albums", "songs_in_album", "playlists", "playlist_items"],
+)
+async def test_empty_library_returns_empty_list(
+    piano: Disklavier, fake_piano: FakePiano, call
 ) -> None:
-    """An empty library is an error envelope inside HTTP 200."""
+    """An empty library is an error envelope inside HTTP 200, translated back to [].
+
+    The envelope -- seen on real hardware for an empty My Recordings -- still carries
+    ``song_list: []``, so the error spelling is the firmware's, not a fault. Every
+    browse method must apply the same translation.
+    """
     fake_piano.command_body = dumps(
         {"status": "error", "error_info": "no song", "song_list": []}
     )
-    with pytest.raises(DisklavierResponseError, match="no song"):
-        await piano.async_get_songs(SongGroup.MY_SONGS)
+    assert await call(piano) == []
+
+
+async def test_null_list_in_empty_envelope_is_tolerated(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """A null where the envelope's list should be is treated as empty, not iterated.
+
+    The confirmed firmware envelope always carries ``[]``, but a broken or spoofed
+    device could send ``null``; that must not escape as a bare ``TypeError``.
+    """
+    fake_piano.command_body = dumps(
+        {"status": "error", "error_info": "no song", "song_list": None}
+    )
+    assert await piano.async_get_songs(SongGroup.MY_RECORDINGS) == []
+    fake_piano.command_body = dumps(
+        {"status": "error", "error_info": "no song", "album_list": None}
+    )
+    assert await piano.async_get_albums(SongGroup.MY_RECORDINGS) == []
+    fake_piano.command_body = dumps(
+        {"status": "error", "error_info": "no song", "playlist_list": None}
+    )
+    assert await piano.async_get_playlists(PlaylistGroup.PLAYLISTS) == []
+
+
+async def test_error_envelope_raises_structured_response_error(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """A non-library error envelope raises, carrying the envelope's fields.
+
+    The shape the firmware uses when a command cannot be served -- for example when
+    the DisklavierRadio service is unavailable -- is an error envelope inside HTTP
+    200. The exception's attributes let callers tell such envelopes apart without
+    parsing the message string.
+    """
+    fake_piano.command_body = dumps({"status": "error", "error_info": "not available"})
+    with pytest.raises(DisklavierResponseError, match="not available") as excinfo:
+        await piano.async_get_radio_channels()
+    assert excinfo.value.command == "get_radio_channel_list"
+    assert excinfo.value.error_info == "not available"
 
 
 async def test_invalid_json_raises_response_error(
@@ -105,6 +161,74 @@ async def test_truncated_json_is_retried(
     assert info.volume == 100
     # One truncated read, then a good one.
     assert len(fake_piano.requests) == 2
+
+
+async def test_truncated_multibyte_read_is_retried(
+    piano: Disklavier, fake_piano: FakePiano, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read cut inside a multibyte character retries like any other truncation.
+
+    The libraries carry non-ASCII titles, so a mid-write read will eventually land
+    inside one. The resulting ``UnicodeDecodeError`` must feed the retry loop, not
+    escape raw to the caller.
+    """
+    monkeypatch.setattr(client_module, "JSON_RETRY_DELAY", 0.0)
+
+    payload = dict(CURRENT_INFO_PAYLOAD, song_title="月の光")
+    whole = json.dumps(payload, ensure_ascii=False).encode()
+    # One byte into the three-byte character: undecodable, not merely unparsable.
+    fake_piano.current_raw = whole[: whole.index("月".encode()) + 1]
+
+    def _heal() -> None:
+        fake_piano.current_raw = whole
+
+    fake_piano.on_current_info = _heal
+
+    info = await piano.async_get_current_info()
+    assert info.song_title == "月の光"
+    # One undecodable read, then a good one.
+    assert len(fake_piano.requests) == 2
+
+
+async def test_persistent_multibyte_truncation_raises_response_error(
+    piano: Disklavier, fake_piano: FakePiano, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A decode failure that never heals exhausts the retries into the library's error."""
+    monkeypatch.setattr(client_module, "JSON_RETRY_DELAY", 0.0)
+
+    whole = json.dumps(
+        dict(CURRENT_INFO_PAYLOAD, song_title="月の光"), ensure_ascii=False
+    ).encode()
+    fake_piano.current_raw = whole[: whole.index("月".encode()) + 1]
+
+    with pytest.raises(DisklavierResponseError, match="invalid JSON"):
+        await piano.async_get_current_info()
+    assert len(fake_piano.requests) == JSON_RETRY_ATTEMPTS
+
+
+async def test_oversized_response_raises_response_error(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """A body past the size ceiling is refused rather than buffered without limit."""
+    fake_piano.current_raw = b"x" * (MAX_RESPONSE_BYTES + 1)
+    with pytest.raises(DisklavierResponseError, match="exceeded"):
+        await piano.async_get_current_info()
+    # Oversize is not truncation: it must fail once, not burn retries re-reading it.
+    assert len(fake_piano.requests) == 1
+
+
+async def test_redirect_is_refused(piano: Disklavier, fake_piano: FakePiano) -> None:
+    """A redirect is refused rather than followed.
+
+    No endpoint this client calls legitimately redirects, and following one would hand
+    the request to whatever host a spoofed piano names in the Location header.
+    """
+    fake_piano.command_status = 302
+    fake_piano.command_headers = {"Location": f"{PATH_API_BASE}/current_info"}
+    with pytest.raises(DisklavierResponseError, match="redirected"):
+        await piano.async_play()
+    # The Location target must never have been fetched.
+    assert len(fake_piano.requests) == 1
 
 
 async def test_null_terminated_json_is_accepted(
