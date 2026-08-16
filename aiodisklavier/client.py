@@ -17,6 +17,7 @@ Example::
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
 from typing import Any, Final
@@ -30,6 +31,7 @@ from .const import (
     JSON_RETRY_ATTEMPTS,
     JSON_RETRY_DELAY,
     MAX_RESPONSE_BYTES,
+    MAX_SONG_DB_BYTES,
     NOTIFY_POLL_INTERVAL,
     NOTIFY_SETTLE,
     NOTIFY_WAIT_TIMEOUT,
@@ -39,6 +41,7 @@ from .const import (
     PATH_CTRL_REFRESH_DB,
     PATH_CTRL_SEQ,
     PATH_CTRL_SONG,
+    PATH_CTRL_SONG_DB,
     PATH_CURRENT_INFO,
     PATH_STATIC_INFO,
     PREFIX_TO_SONG_GROUP,
@@ -50,6 +53,7 @@ from .const import (
     PowerStatus,
     QuietMode,
     RepeatMode,
+    SearchKind,
     SongGroup,
 )
 from .exceptions import (
@@ -61,11 +65,14 @@ from .exceptions import (
 from .models import (
     Album,
     CurrentInfo,
+    LibrarySong,
     MasterState,
     PlaybackSnapshot,
     Playlist,
     RadioChannel,
+    SearchResult,
     Song,
+    SongDatabase,
     StaticInfo,
 )
 
@@ -92,6 +99,32 @@ _EMPTY_LIBRARY_ERROR: Final = "no song"
 #: parsing. This is distinct from a genuinely truncated read, which still retries.
 _JSON_STRIP: Final = "\x00 \t\r\n\v\f"
 
+#: Fuzzy matches scoring below this are dropped from search results. difflib happily
+#: reports similarity between any two strings; below here it is noise, not a match.
+_FUZZY_CUTOFF: Final = 0.6
+
+
+def _match_score(query: str, title: str) -> float:
+    """Score a title against a query: 0 is no match, 1 is exact.
+
+    Exact match beats a prefix, a prefix beats a substring, and a substring beats a
+    fuzzy resemblance -- so "Clair" surfaces "Clair de lune" ahead of titles that merely
+    look similar. Comparison is casefolded, and fuzzy scores below
+    :data:`_FUZZY_CUTOFF` are treated as no match at all.
+    """
+    wanted = query.casefold().strip()
+    candidate = title.casefold()
+    if not wanted or not candidate:
+        return 0.0
+    if wanted == candidate:
+        return 1.0
+    ratio = difflib.SequenceMatcher(None, wanted, candidate).ratio()
+    if candidate.startswith(wanted):
+        return max(0.9, ratio)
+    if wanted in candidate:
+        return max(0.8, ratio)
+    return ratio if ratio >= _FUZZY_CUTOFF else 0.0
+
 
 class Disklavier:
     """Client for a single Disklavier ENSPIRE.
@@ -116,6 +149,7 @@ class Disklavier:
         self._session = session
         self._timeout = aiohttp.ClientTimeout(total=timeout)
         self._base = URL.build(scheme="http", host=host, port=port)
+        self._song_db: SongDatabase | None = None
 
     @property
     def host(self) -> str:
@@ -126,7 +160,13 @@ class Disklavier:
     # Transport
     # ------------------------------------------------------------------
 
-    async def _get(self, path: str, params: dict[str, Any] | None = None) -> bytes:
+    async def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        max_bytes: int = MAX_RESPONSE_BYTES,
+    ) -> bytes:
         """Perform a GET and return the raw body.
 
         The body is returned undecoded: a state read can catch the daemon mid-write, and
@@ -137,7 +177,7 @@ class Disklavier:
         :raises DisklavierCommandError: the piano returned HTTP 400.
         :raises DisklavierConnectionError: the piano was unreachable or timed out.
         :raises DisklavierResponseError: the piano redirected, or the body ran past
-            :data:`~aiodisklavier.const.MAX_RESPONSE_BYTES`.
+            ``max_bytes`` (:data:`~aiodisklavier.const.MAX_RESPONSE_BYTES` by default).
         """
         url = self._base.with_path(path)
         try:
@@ -162,10 +202,9 @@ class Disklavier:
                 body = bytearray()
                 while chunk := await response.content.read(_READ_CHUNK_BYTES):
                     body += chunk
-                    if len(body) > MAX_RESPONSE_BYTES:
+                    if len(body) > max_bytes:
                         raise DisklavierResponseError(
-                            f"Disklavier response from {url} exceeded "
-                            f"{MAX_RESPONSE_BYTES} bytes"
+                            f"Disklavier response from {url} exceeded {max_bytes} bytes"
                         )
                 return bytes(body)
         except DisklavierError:
@@ -180,7 +219,11 @@ class Disklavier:
             ) from err
 
     async def _get_json(
-        self, path: str, params: dict[str, Any] | None = None
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        max_bytes: int = MAX_RESPONSE_BYTES,
     ) -> dict[str, Any]:
         """Perform a GET and decode the JSON body.
 
@@ -190,7 +233,7 @@ class Disklavier:
         raw = b""
         for attempt in range(JSON_RETRY_ATTEMPTS):
             try:
-                raw = await self._get(path, params)
+                raw = await self._get(path, params, max_bytes=max_bytes)
                 # Decode and parse under one net: a read that catches the daemon
                 # mid-write can be cut inside a multibyte character just as easily as
                 # inside the JSON, and both heal the same way -- by re-reading. A
@@ -590,6 +633,99 @@ class Disklavier:
             )
             for row in data.get("channel_list") or []
         ]
+
+    # ------------------------------------------------------------------
+    # Song database and search
+    # ------------------------------------------------------------------
+
+    async def async_get_song_db(self, *, refresh: bool = False) -> SongDatabase:
+        """Fetch the piano's own song database, from ``/ctrl/song.json``.
+
+        This is the controller UI's backing store rather than part of the open API: one
+        fetch describes every song in every library, including the media format the
+        open API's listings omit. It is large -- most of a megabyte at two thousand
+        songs -- so the parsed database is cached on the client. Pass ``refresh=True``
+        to force a re-read, or let :meth:`async_lookup_song` refresh on a miss.
+        """
+        if refresh or self._song_db is None:
+            data = await self._get_json(PATH_CTRL_SONG_DB, max_bytes=MAX_SONG_DB_BYTES)
+            self._song_db = SongDatabase.from_json(data)
+        return self._song_db
+
+    async def async_lookup_song(self, prefix: str, song_id: int) -> LibrarySong | None:
+        """Describe one song by the identity the sequencer reports for it.
+
+        ``master.json`` names the loaded song as a library prefix and id (see
+        :attr:`~aiodisklavier.models.MasterState.song_prefix`); this joins that pair
+        against the song database. A miss refreshes the cached database once before
+        giving up, because a fresh recording or a share re-index mints keys an older
+        cache has never seen.
+        """
+        db = await self.async_get_song_db()
+        song = db.lookup(prefix, song_id)
+        if song is None:
+            db = await self.async_get_song_db(refresh=True)
+            song = db.lookup(prefix, song_id)
+        return song
+
+    async def async_search(self, query: str, *, limit: int = 20) -> list[SearchResult]:
+        """Search songs, playlists and radio channels by title, best matches first.
+
+        Matching happens in this library rather than on the piano: the open API's
+        ``search_title`` can only *play* its single fuzzy pick, never return
+        candidates. Songs come from the song database, so one fetch covers every
+        library; playlists come from both playlist groups; radio channels are included
+        where the service exists -- a region without DisklavierRadio answers with an
+        error envelope, which here just means no radio results. Songs whose library
+        prefix maps to no open-API group are left out, so every result can actually be
+        played. Ties keep the piano's own ordering.
+        """
+        results: list[SearchResult] = []
+
+        db = await self.async_get_song_db()
+        for song in db.songs.values():
+            if song.group is None:
+                continue
+            score = _match_score(query, song.title)
+            if score:
+                results.append(
+                    SearchResult(
+                        kind=SearchKind.SONG, title=song.title, score=score, song=song
+                    )
+                )
+
+        for group in PlaylistGroup:
+            for playlist in await self.async_get_playlists(group):
+                score = _match_score(query, playlist.title)
+                if score:
+                    results.append(
+                        SearchResult(
+                            kind=SearchKind.PLAYLIST,
+                            title=playlist.title,
+                            score=score,
+                            playlist=playlist,
+                            playlist_group=group,
+                        )
+                    )
+
+        try:
+            channels = await self.async_get_radio_channels()
+        except DisklavierResponseError:
+            channels = []
+        for channel in channels:
+            score = _match_score(query, channel.title)
+            if score:
+                results.append(
+                    SearchResult(
+                        kind=SearchKind.RADIO,
+                        title=channel.title,
+                        score=score,
+                        channel=channel,
+                    )
+                )
+
+        results.sort(key=lambda result: result.score, reverse=True)
+        return results[:limit]
 
     async def async_play_radio(self, channel_id: int) -> None:
         """Start a radio channel.

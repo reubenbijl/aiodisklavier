@@ -88,6 +88,70 @@ MASTER_PAYLOAD = {
     "sbc": {"headphone": "disconnected", "usb": "connected"},
 }
 
+# A miniature /ctrl/song.json: the sections the client reads, shaped as the firmware
+# serves them -- rows keyed by prefix+id, every scalar a string.
+SONG_DB_PAYLOAD = {
+    "lang": "en",
+    "update": "40157193",
+    "song": {
+        "d1": {
+            "pfix": "d",
+            "song_id": "1",
+            "song_title": "Angel",
+            "format": "SMF,MP3",
+            "length": "350760",
+            "album_id": "1",
+            "genre": "Pop",
+            "composer": "",
+            "performer": "Sarah McLachlan",
+        },
+        "d250": {
+            "pfix": "d",
+            "song_id": "250",
+            "song_title": "Invention 1",
+            "format": "SMFSOLO",
+            "length": "69479",
+            "album_id": "9",
+            "genre": "Classical",
+            "composer": "J. S. Bach",
+            "performer": "",
+        },
+        "y24": {
+            "pfix": "y",
+            "song_id": "24",
+            "song_title": "Clair de lune",
+            "format": "SMFXG",
+            "length": "300000",
+            "album_id": "2",
+            "genre": "Classical",
+            "composer": "Claude Debussy",
+            "performer": "",
+        },
+        "f7": {
+            "pfix": "f",
+            "song_id": "7",
+            "song_title": "Someone Like You",
+            "format": "SMF",
+            "length": "324208",
+            "album_id": "22",
+            "genre": "",
+            "composer": "",
+            "performer": "Adele",
+        },
+        # An unmapped prefix: parsed into the database, excluded from search results.
+        "q9": {
+            "pfix": "q",
+            "song_id": "9",
+            "song_title": "Clair de lune (mystery copy)",
+            "format": "SMF",
+            "length": "1000",
+            "album_id": "1",
+        },
+        # A row with no identity: dropped during parsing.
+        "broken": {"song_title": "No ids"},
+    },
+}
+
 
 def dumps(payload: object) -> str:
     """Serialise a payload the way the firmware would."""
@@ -123,6 +187,8 @@ class FakePiano:
     command_status: int = 200
     #: Per-command status overrides, so one command can fail while the rest work.
     command_status_for: dict[str, int] = field(default_factory=dict)
+    #: Per-command body overrides, so one command can answer differently from the rest.
+    command_body_for: dict[str, str] = field(default_factory=dict)
     #: Extra headers on open API command replies, e.g. a Location for a redirect.
     command_headers: dict[str, str] = field(default_factory=dict)
     #: Body returned by /api/current_info.
@@ -138,6 +204,8 @@ class FakePiano:
     on_current_info: Callable[[], None] | None = None
     #: Seconds to stall every response, for exercising client-side timeouts.
     delay: float = 0.0
+    #: Body returned by /ctrl/song.json. Defaults to a small but complete database.
+    song_db_body: str = field(default_factory=lambda: dumps(SONG_DB_PAYLOAD))
 
     async def _record(self, request: web.Request) -> None:
         self.requests.append(
@@ -184,11 +252,15 @@ class FakePiano:
             await self._record(request)
             return web.Response(text=dumps(MASTER_PAYLOAD))
 
+        async def song_db(request: web.Request) -> web.Response:
+            await self._record(request)
+            return web.Response(text=self.song_db_body)
+
         async def command(request: web.Request) -> web.Response:
             await self._record(request)
             name = request.path.rpartition("/")[2]
             return web.Response(
-                text=self.command_body,
+                text=self.command_body_for.get(name, self.command_body),
                 status=self.command_status_for.get(name, self.command_status),
                 headers=self.command_headers,
             )
@@ -204,6 +276,7 @@ class FakePiano:
         app.router.add_get(PATH_CURRENT_INFO, current_info)
         app.router.add_get(f"{PATH_API_BASE}/{{command}}", command)
         app.router.add_get("/ctrl/master.json", master_json)
+        app.router.add_get("/ctrl/song.json", song_db)
         app.router.add_get("/ctrl/setSeq.php", ctrl)
         app.router.add_get("/ctrl/setSong.php", ctrl)
         app.router.add_get("/ctrl/putNoteOn.php", ctrl)

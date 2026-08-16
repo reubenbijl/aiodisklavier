@@ -340,6 +340,18 @@ pushes at its client), `apictrl`, `radio`, `login`, `firmware`. **[live]**
 `metronome` `rec_level` `rec_level_peak`) and `playfunc` (`trans` = transpose, `left_hand`,
 `right_hand`, `pedal`). **[live]**
 
+`song.json` is the controller UI's whole media database in one body (~0.9 MB at 1,968
+songs): `album`, `song`, `playlist`, `psong`, `artist`, `genre` and `type` sections, plus an
+`update` counter the firmware bumps on re-index. Songs are keyed by library prefix + id
+(`d1`, `f3608`) — the same pair `master.json`'s `seq` block reports for the loaded song, so
+the two join directly. Each song row carries `format`, drawn from the `type` vocabulary
+(`SMF`, `SMFSOLO`, `SMFXG`, `SMF,MP3`, …): this is the field the web app's format badges
+switch on (`frame.js: song_format()`), and the app disables its tempo slider exactly for the
+audio-driven values (`play.js: updateTempoEnable()`), because a recorded backing track is
+the master clock — the same reason a stopped audio song reports `seq.tempo` as `0` where a
+MIDI song reports its scaling percentage. Album rows carry `coverart_path` under the HTTP
+root. **[live]**
+
 ---
 
 ## 7. Behaviours you only find on hardware

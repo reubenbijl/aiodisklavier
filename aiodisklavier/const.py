@@ -26,6 +26,7 @@ PATH_CTRL_SONG: Final = "/ctrl/setSong.php"
 PATH_CTRL_MASTER_JSON: Final = "/ctrl/master.json"
 PATH_CTRL_PUT_NOTE_ON: Final = "/ctrl/putNoteOn.php"
 PATH_CTRL_REFRESH_DB: Final = "/ctrl/setRefreshDB.php"
+PATH_CTRL_SONG_DB: Final = "/ctrl/song.json"
 
 DEFAULT_PORT: Final = 80
 DEFAULT_TIMEOUT: Final = 10.0
@@ -34,6 +35,12 @@ DEFAULT_TIMEOUT: Final = 10.0
 #: is a full song list at a few hundred kB, so anything past this is not the piano talking.
 #: Reads stop here rather than letting a hostile or broken device stream without limit.
 MAX_RESPONSE_BYTES: Final = 1024 * 1024
+
+#: Upper bound for the song database alone. ``/ctrl/song.json`` describes every song in
+#: every library in one body -- 0.9 MB at two thousand songs on the reference unit, which
+#: the general ceiling would already reject. Eight megabytes leaves room for a library
+#: several times that size while still refusing an unbounded stream.
+MAX_SONG_DB_BYTES: Final = 8 * 1024 * 1024
 
 # The state endpoints are files the control daemon rewrites in place, so a read can catch
 # one mid-write and come back truncated. Observed on 5.24.00 against /api/current_info.
@@ -209,6 +216,49 @@ class GenreSelect(StrEnum):
 
     TOP = "top"
     RANDOM = "random"
+
+
+class SongFormat(StrEnum):
+    """A song's media format, as the song database's own vocabulary spells it.
+
+    These are the values ``/ctrl/song.json`` reports per song, and exactly what the
+    controller's own UI switches its format badges on. ``SMF,WAV`` and ``WAV`` never
+    appeared in the reference library, but the controller handles them, so they are
+    carried here too.
+    """
+
+    SMF = "SMF"
+    SMF_SOLO = "SMFSOLO"
+    SMF_XG = "SMFXG"
+    SMF_WAV = "SMF,WAV"
+    SMF_MP3 = "SMF,MP3"
+    WAV = "WAV"
+
+    @property
+    def has_audio(self) -> bool:
+        """Whether playing this format sends sound to the speakers, not just the keys.
+
+        The audio-pair formats carry a recorded backing track, and ``SMF_XG`` scores its
+        accompaniment on the internal XG tone generator; either way the speaker path is
+        in use, and anything wired to it -- an amplifier, a receiver -- wants switching
+        on. ``SMF_SOLO`` and plain ``SMF`` drive only the keys. A plain ``SMF`` could in
+        principle still hold ensemble channels for the tone generator to voice; the
+        database cannot see inside the file, so this keeps the keys-only reading.
+        """
+        return self in _AUDIO_FORMATS
+
+
+_AUDIO_FORMATS: Final[frozenset[SongFormat]] = frozenset(
+    {SongFormat.SMF_XG, SongFormat.SMF_WAV, SongFormat.SMF_MP3, SongFormat.WAV}
+)
+
+
+class SearchKind(StrEnum):
+    """What a :class:`aiodisklavier.models.SearchResult` points at."""
+
+    SONG = "song"
+    PLAYLIST = "playlist"
+    RADIO = "radio"
 
 
 #: ``master.json`` reports the current library as a bare one-letter prefix, while the open API

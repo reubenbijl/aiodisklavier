@@ -9,7 +9,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .const import PlaybackStatus, PowerStatus, QuietMode, RepeatMode
+from .const import (
+    PREFIX_TO_SONG_GROUP,
+    PlaybackStatus,
+    PlaylistGroup,
+    PowerStatus,
+    QuietMode,
+    RepeatMode,
+    SearchKind,
+    SongFormat,
+    SongGroup,
+)
 
 
 def _dict_or_empty(value: Any) -> dict[str, Any]:
@@ -181,6 +191,11 @@ class MasterState:
     metronome_beat: str | None
     key_motion: bool | None
     tempo: int | None
+    #: Which library the loaded song lives in, as the sequencer's one-letter prefix.
+    #: Together with :attr:`song_id` this keys the song database -- see
+    #: :meth:`aiodisklavier.Disklavier.async_lookup_song`.
+    song_prefix: str | None
+    song_id: int | None
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> MasterState:
@@ -208,6 +223,8 @@ class MasterState:
             metronome_beat=_str_or_none(piano.get("met_beat")),
             key_motion=None if key_motion is None else key_motion == "on",
             tempo=_int_or_none(seq.get("tempo")),
+            song_prefix=_str_or_none(seq.get("song_pfix")),
+            song_id=_int_or_none(seq.get("song_id")),
         )
 
 
@@ -246,6 +263,112 @@ class PlaybackSnapshot:
     def has_song(self) -> bool:
         """Whether a song was loaded and can therefore be reselected."""
         return bool(self.song_prefix) and self.song_id is not None
+
+
+@dataclass(frozen=True, slots=True)
+class LibrarySong:
+    """One song as the piano's own database describes it, from ``/ctrl/song.json``.
+
+    Richer than the open API's :class:`Song` rows: the database is the controller UI's
+    backing store, and it carries what the listings omit -- most usefully the media
+    :class:`~aiodisklavier.const.SongFormat`, which is how the controller knows to show
+    a format badge and to lock the tempo control for audio-driven songs.
+    """
+
+    prefix: str
+    song_id: int
+    title: str
+    format: SongFormat | None
+    group: SongGroup | None
+    album_id: int | None
+    length_ms: int | None
+    genre: str | None
+    composer: str | None
+    performer: str | None
+
+    @classmethod
+    def from_json(cls, row: dict[str, Any]) -> LibrarySong | None:
+        """Build from one database row, or ``None`` for a row missing its identity."""
+        prefix = _str_or_none(row.get("pfix"))
+        song_id = _int_or_none(row.get("song_id"))
+        if prefix is None or song_id is None:
+            return None
+
+        try:
+            song_format = SongFormat(str(row.get("format")))
+        except ValueError:
+            song_format = None
+
+        return cls(
+            prefix=prefix,
+            song_id=song_id,
+            title=str(row.get("song_title", "")),
+            format=song_format,
+            group=PREFIX_TO_SONG_GROUP.get(prefix),
+            album_id=_int_or_none(row.get("album_id")),
+            length_ms=_int_or_none(row.get("length")),
+            genre=_str_or_none(row.get("genre")),
+            composer=_str_or_none(row.get("composer")),
+            performer=_str_or_none(row.get("performer")),
+        )
+
+    @property
+    def has_audio(self) -> bool | None:
+        """Whether playing this song uses the speaker path, or ``None`` if unknown.
+
+        See :attr:`aiodisklavier.const.SongFormat.has_audio` for the rule.
+        """
+        return None if self.format is None else self.format.has_audio
+
+
+@dataclass(frozen=True, slots=True)
+class SongDatabase:
+    """The piano's own song database, from ``/ctrl/song.json``.
+
+    One fetch describes every song in every library. Entries are keyed the way the
+    database keys them -- library prefix immediately followed by the song id, ``d1`` or
+    ``f3608`` -- which is also how ``master.json``'s sequencer block names the loaded
+    song, so a lookup joins the two directly.
+    """
+
+    #: The database's own change counter. The firmware bumps it when the library is
+    #: re-indexed, so two fetches reporting the same value describe the same library.
+    update: int | None
+    songs: dict[str, LibrarySong]
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> SongDatabase:
+        """Build from a decoded ``/ctrl/song.json`` payload."""
+        songs: dict[str, LibrarySong] = {}
+        for key, row in _dict_or_empty(data.get("song")).items():
+            song = LibrarySong.from_json(_dict_or_empty(row))
+            if song is not None:
+                songs[str(key)] = song
+        return cls(update=_int_or_none(data.get("update")), songs=songs)
+
+    def lookup(self, prefix: str, song_id: int) -> LibrarySong | None:
+        """Find one song by the identity the sequencer reports for it."""
+        return self.songs.get(f"{prefix}{song_id}")
+
+
+@dataclass(frozen=True, slots=True)
+class SearchResult:
+    """One search hit, carrying whichever reference its kind needs to play it.
+
+    A ``SONG`` result holds :attr:`song` (play with
+    :meth:`~aiodisklavier.Disklavier.async_play_song` using its id and group); a
+    ``PLAYLIST`` result holds :attr:`playlist` and :attr:`playlist_group`; a ``RADIO``
+    result holds :attr:`channel`.
+    """
+
+    kind: SearchKind
+    title: str
+    #: Match quality, 0 exclusive to 1 inclusive; results come back best-first.
+    score: float
+    song: LibrarySong | None = None
+    playlist: Playlist | None = None
+    playlist_group: PlaylistGroup | None = None
+    channel: RadioChannel | None = None
 
 
 @dataclass(frozen=True, slots=True)

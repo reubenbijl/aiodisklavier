@@ -28,6 +28,8 @@ from .const import (
     PowerStatus,
     QuietMode,
     RepeatMode,
+    SearchKind,
+    SongFormat,
     SongGroup,
 )
 from .exceptions import (
@@ -43,11 +45,14 @@ from .exceptions import (
 from .models import (
     Album,
     CurrentInfo,
+    LibrarySong,
     MasterState,
     PlaybackSnapshot,
     Playlist,
     RadioChannel,
+    SearchResult,
     Song,
+    SongDatabase,
     StaticInfo,
 )
 from .share import (
@@ -59,7 +64,7 @@ from .share import (
     SyncResult,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "AUDIO_SUFFIXES",
@@ -88,6 +93,7 @@ __all__ = [
     "DisklavierShareNotFoundError",
     "Genre",
     "GenreSelect",
+    "LibrarySong",
     "MasterState",
     "PlaybackSnapshot",
     "PlaybackStatus",
@@ -97,8 +103,12 @@ __all__ = [
     "QuietMode",
     "RadioChannel",
     "RepeatMode",
+    "SearchKind",
+    "SearchResult",
     "ShareEntry",
     "Song",
+    "SongDatabase",
+    "SongFormat",
     "SongGroup",
     "StaticInfo",
     "SyncAction",

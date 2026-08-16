@@ -6,6 +6,32 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-08-16
+
+### Added
+
+- **The piano's own song database.** `async_get_song_db` fetches `/ctrl/song.json` — the
+  controller UI's backing store — parsed into `SongDatabase` / `LibrarySong` and cached on
+  the client. It carries what the open API's listings omit, most usefully each song's media
+  format, plus genre, composer, performer and length. `async_lookup_song` joins the
+  sequencer's `song_pfix`/`song_id` pair (now exposed as `MasterState.song_prefix` /
+  `song_id`) against the database, refreshing the cache once on a miss so fresh recordings
+  and re-indexed shares are found.
+- **`SongFormat`**, the database's media-format vocabulary, with the business rule attached:
+  `SongFormat.has_audio` (and `LibrarySong.has_audio`) says whether playback uses the
+  speaker path — recorded backing tracks (`SMF,WAV`, `SMF,MP3`, `WAV`) and XG-scored
+  accompaniment (`SMFXG`) do; `SMFSOLO` and plain `SMF` drive only the keys. This is the
+  same field the controller UI uses for its format badges and for locking the tempo control
+  on audio-driven songs.
+- **Title search that returns candidates.** `async_search` ranks songs, playlists and radio
+  channels — exact over prefix over substring over fuzzy — and returns `SearchResult` rows
+  ready to hand to the matching play call. The open API's `search_title` can only play its
+  single fuzzy pick; this searches the song database instead, covering every library in one
+  fetch, and treats a region without DisklavierRadio as simply contributing no results.
+- The song database read gets its own response ceiling, `MAX_SONG_DB_BYTES` (8 MB): the
+  database is most of a megabyte on a two-thousand-song unit, which the general 1 MB
+  ceiling would already reject. Every other endpoint keeps the tighter bound.
+
 ## [0.2.0] — 2026-08-16
 
 A minor rather than a patch: the library gains a second transport and a new dependency.
