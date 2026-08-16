@@ -5,6 +5,10 @@ state, SMB for getting your own music onto the instrument.
 
 Talks to the piano directly over your own network. Verified against firmware **5.24.00** on a Disklavier ENSPIRE PRO grand.
 
+> Not affiliated with, endorsed by, or sponsored by Yamaha Corporation. Yamaha, Disklavier
+> and ENSPIRE are trademarks of Yamaha Corporation, used here only to identify the hardware
+> this library talks to.
+
 ## Install
 
 ```bash
@@ -193,4 +197,12 @@ because they look arbitrary otherwise.
 
 ## Licence
 
-MIT
+MIT — see [LICENSE](LICENSE).
+
+This project documents and interoperates with a local network interface exposed by hardware
+the owner already has on their own network. It contains no Yamaha source code, firmware or
+musical content, and circumvents no access control: the piano's local API is unauthenticated
+as shipped. The protocol was derived by observing traffic, not by decompiling anything.
+
+Yamaha, Disklavier and ENSPIRE are trademarks of Yamaha Corporation. This project is not
+affiliated with, endorsed by, or sponsored by Yamaha Corporation.
