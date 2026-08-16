@@ -1,8 +1,9 @@
-# Yamaha Disklavier ENSPIRE — local HTTP API
+# Yamaha Disklavier ENSPIRE — local API
 
 Reference for building a local-control integration, compiled entirely from what the piano
-itself serves over HTTP on your own network. Verified against a unit running **5.24.00**
-(`PRO`, grand, region `World`).
+itself serves on your own network: an HTTP API for control and state (§1–§7), and an SMB
+share for getting content onto the instrument (§8). Verified against a unit running
+**5.24.00** (`PRO`, grand, region `World`).
 
 Every claim is marked with where it came from:
 
@@ -392,7 +393,117 @@ returns 200 and silently keeps the previous value.
 
 ---
 
-## 8. Not established
+## 8. SMB — the PC Sharing Folder
+
+The second way onto the piano, and the only way to add content: write a `.mid` to the share,
+`GET /ctrl/setRefreshDB.php` to reindex, then play it by title. Everything here is **[live]**
+against the same unit.
+
+### The server is SMB1-only, and that decides your library
+
+Two version numbers matter here and they are easy to conflate. **Samba 3.0.37** is the server
+*software* the piano runs — a 2010 release, reported in the `IPC$` share comment. **SMB1**,
+also called NT1, is the *protocol dialect* that software speaks. Samba did not gain SMB2 at
+all until 3.6, so this server has no dialect newer than SMB1 to offer, and an SMB2
+`NEGOTIATE` gets no reply: the socket is closed.
+
+```
+smbprotocol → SMBConnectionClosed: SMB socket was closed
+pysmb       → connected, shares listed, files transferred
+```
+
+macOS agrees, reporting `SMB_VERSION SMB_1` for its own mount of the share (`smbutil
+statshares -a`) even though the client offers SMB1/2/3.
+
+So a client library has to still speak NT1. **`smbprotocol` supports 2.0.2 upwards and cannot
+talk to this piano at all**; `pysmb` can, and negotiates SMB2 where a server offers it, so
+choosing it costs nothing if a later firmware moves on. This is why `aiodisklavier` depends
+on pysmb.
+
+### Shares and access
+
+| Share | |
+|---|---|
+| `PC Sharing Folder` | read-write, the one that matters |
+| `ENSPIRE Controller` | read-only, the controller's own files |
+| `IPC$` | the usual pipe; its comment is where the Samba version shows up |
+
+Stock firmware serves these to **guests**: a session was granted for `guest` with no password,
+for a username that does not exist, and for an empty username alike, with full write access
+each time. NTLMv2 and NTLMv1 both work. Treat the share as unauthenticated and the LAN as the
+security boundary — the same trust model as the HTTP API.
+
+### Behaviours worth knowing
+
+- **NT status codes are conventional.** A missing leaf answers `0xC0000034`
+  (`OBJECT_NAME_NOT_FOUND`), a missing parent `0xC000003A` (`OBJECT_PATH_NOT_FOUND`), creating
+  a directory that exists `0xC0000035` (`OBJECT_NAME_COLLISION`), and removing a populated
+  directory `0xC0000101` (`DIRECTORY_NOT_EMPTY`).
+- **Timestamps are the time of the write, at one-second resolution**, and the piano's clock
+  agrees with real time. So "the local file is newer than its copy" is a sound test for
+  "changed since it was last sent" — which is what makes an incremental mirror possible
+  without keeping a manifest on the share.
+- **The indexer descends exactly two folder levels, and says nothing about the third.** This
+  is the one that will cost you an afternoon. `<folder>/<subfolder>/song.mid` is indexed and
+  the subfolder becomes an album; `<folder>/<sub>/<sub>/song.mid` is copied fine, lists fine
+  over SMB, and never appears in the library — no error from the write, none from the
+  reindex.
+
+  Established by planting the same file at three depths and reindexing:
+
+  | Path | Indexed |
+  |---|---|
+  | `ImpromptuApp/depthprobe/DEPTH2.mid` | yes — album `ImpromptuApp/depthprobe` |
+  | `ImpromptuApp/depthprobe/lvl3/DEPTH3.mid` | no |
+  | `ImpromptuApp/depthprobe/lvl3/lvl4/DEPTH4.mid` | no |
+
+  A search for `DEPTH3` fuzzy-matched back to `DEPTH2`, confirming the deeper two were
+  absent from the database rather than merely unlisted. A catalogue laid out as
+  `<root>/maestro/<Composer>/*.mid` is one level too deep; flatten it to
+  `<root>/<Composer>/*.mid`. With that done, 1297 files across 61 folders indexed as 61
+  albums, and `get_song_list&group=pc_sharing_folder` returned all **1326** songs on the
+  share in one response — that listing is not paginated or capped.
+- **A folder holding songs is an album.** `get_album_list&group=pc_sharing_folder` reports
+  each such folder with its path as the title, which is the only way to enumerate a large
+  share by structure. Folders that contain nothing but other folders are not albums.
+- **An audio file sharing a MIDI file's basename is that song's backing track, not a song.**
+  Drop `song.mid` and `song.wav` in together and the firmware pairs them: the keys play the
+  MIDI, the audio plays through the speakers. This is Yamaha's SMF+Audio, and it is what
+  makes a transcription sound like the record rather than a piano reduction of it.
+
+  The pairing is invisible in the listing, which is what makes it easy to miss. The share
+  root here holds nine files — seven `.mid` and two `.mp3` — and indexes exactly **seven**
+  songs. Neither MP3 appears on its own.
+
+  Confirmed by adding one `.wav` beside an already-indexed `.mid` and reindexing:
+
+  | | Songs in that folder | Reported `endtime` |
+  |---|---|---|
+  | `Patient.mid` alone | 21 | 187558 ms |
+  | `Patient.mid` + `Patient.wav` | 21 | **190589 ms** |
+
+  The song count did not move, so the WAV was not indexed separately — and the duration
+  became the *audio* file's 190.6 s rather than the MIDI's 187.6 s, so it was not ignored
+  either. **The audio drives the song length.** Both `.wav` (44.1 kHz, 16-bit stereo) and
+  `.mp3` work.
+
+  The trap: filter a mirror to `{".mid"}` and every transcription still copies, still
+  indexes, and still plays — as a bare piano part with the band missing. Nothing reports it.
+  `aiodisklavier`'s `PLAYABLE_SUFFIXES` includes audio for this reason, and
+  `async_sync_directory` logs a warning if a MIDI is sent while its companion is filtered
+  out.
+- **Do not let macOS write to the share directly.** It leaves `._` AppleDouble companions
+  beside every file, and the indexer treats those as songs — see §7.7 for what loading one
+  does. Anything writing to this share should exclude them; `aiodisklavier` does by default.
+- **Throughput is roughly 1 MB/s** over SMB1 on this LAN — 84.4 MB of MIDI in 87 s, about 15
+  files a second, the per-file round trip dominating rather than the bytes. A single session
+  carries one request at a time, so there is nothing to be gained by transferring in
+  parallel on one connection. Re-scanning the same 1297 files to find nothing to do takes
+  0.8 s, because it costs one directory walk rather than a stat per file.
+
+---
+
+## 9. Not established
 
 Stated plainly rather than guessed at, because everything above is reproducible and these are
 not:

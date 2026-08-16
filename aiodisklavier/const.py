@@ -59,6 +59,79 @@ NOTIFY_SETTLE: Final = 1.0
 #: UPnP device type advertised over SSDP, used for discovery.
 UPNP_DEVICE_TYPE: Final = "urn:schemas-upnp-org:device:Disklavier:1"
 
+# SMB. The piano exports two shares from an embedded Samba 3.0.37, which predates SMB2
+# entirely -- it speaks NT1 and nothing newer. See ``docs/enspire-api.md`` for the
+# negotiation trace; it is the reason this library uses pysmb rather than smbprotocol.
+#: The writable share. Drop MIDI here and reindex to make it playable.
+SHARE_PC_SHARING: Final = "PC Sharing Folder"
+#: The controller's own read-only share.
+SHARE_ENSPIRE_CONTROLLER: Final = "ENSPIRE Controller"
+
+#: Direct-TCP SMB port. Port 139 is also open, and works if ``direct_tcp`` is turned off.
+SMB_PORT: Final = 445
+#: Per-operation timeout in seconds. Higher than the HTTP default because a single
+#: operation here can be a multi-megabyte transfer rather than a status read.
+SMB_TIMEOUT: Final = 30.0
+#: The share is served with guest access on stock firmware, so this username is a label
+#: rather than a credential. A piano configured with a password takes real ones.
+SMB_GUEST_USER: Final = "guest"
+#: NetBIOS name this client claims. Only meaningful over port 139; 15 characters max.
+SMB_CLIENT_NAME: Final = "aiodisklavier"
+#: NetBIOS name assumed for the piano. Unused over direct TCP, where any value is
+#: accepted; override it when connecting over port 139.
+SMB_SERVER_NAME: Final = "DISKLAVIER"
+
+#: Names never written to the share, matched per path component with :mod:`fnmatch`.
+#:
+#: The ``._`` entries are the important ones. macOS writes an AppleDouble companion beside
+#: every file it copies, the firmware's indexer picks those up as songs in their own right,
+#: and loading one silently resets the piano to the first built-in song -- an HTTP 200 with
+#: no error anywhere. See ``docs/enspire-api.md`` §7.7.
+DEFAULT_EXCLUDES: Final[tuple[str, ...]] = (
+    "._*",
+    ".DS_Store",
+    ".Spotlight-V100",
+    ".TemporaryItems",
+    ".Trashes",
+    ".fseventsd",
+    "Thumbs.db",
+    "__pycache__",
+    ".git",
+)
+
+#: Audio extensions the piano accepts as the backing track of an SMF+Audio song.
+#:
+#: An audio file sharing a MIDI file's basename is not a song of its own: the firmware
+#: pairs the two, plays the piano part on the keys and the audio through the speakers, and
+#: reports the *audio* file's length as the song duration. Confirmed on hardware for both
+#: extensions -- see ``docs/enspire-api.md`` §8.
+AUDIO_SUFFIXES: Final[frozenset[str]] = frozenset({".mp3", ".wav"})
+
+#: File extensions worth putting on the share, as ``suffixes`` for a mirror.
+#:
+#: Audio is in here deliberately. Filtering a library down to ``{".mid"}`` looks right and
+#: leaves every transcription playing as a bare piano part with its backing track missing --
+#: which sounds like a working sync, because it is one.
+PLAYABLE_SUFFIXES: Final[frozenset[str]] = (
+    frozenset({".mid", ".midi", ".kar"}) | AUDIO_SUFFIXES
+)
+
+#: How many directory levels below the share root the firmware's indexer descends.
+#:
+#: Two, exactly. ``<folder>/<subfolder>/song.mid`` is indexed and the subfolder shows up as
+#: an album; one level deeper and the file is copied fine, listed fine over SMB, and simply
+#: never appears in the library -- no error, from either the copy or the reindex. Established
+#: by planting the same file at three depths and reindexing: see ``docs/enspire-api.md`` §8.
+#:
+#: A file directly in the share root counts as depth zero, so the deepest indexable path is
+#: ``a/b/song.mid``.
+INDEXED_DEPTH_LIMIT: Final = 2
+
+#: Modification times either side of a copy are compared with this much slack, in seconds.
+#: FAT-derived filesystems keep two-second resolution, so an exact comparison would call
+#: an unchanged file modified on every pass.
+MTIME_TOLERANCE: Final = 2.0
+
 #: ``volume_up_main`` / ``volume_down_main`` move by this much. Confirmed on 5.24.00.
 VOLUME_STEP: Final = 10
 

@@ -1,6 +1,7 @@
 # aiodisklavier
 
-Async Python client for the **Yamaha Disklavier ENSPIRE** local HTTP API.
+Async Python client for the **Yamaha Disklavier ENSPIRE** local API — HTTP for control and
+state, SMB for getting your own music onto the instrument.
 
 Talks to the piano directly over your own network. Verified against firmware **5.24.00** on a Disklavier ENSPIRE PRO grand.
 
@@ -79,6 +80,75 @@ full reasoning, with provenance for every claim, is in
 - **`async_play_test_chord` makes a sound** — a C major triad for one second. It goes to the
   MIDI daemon rather than the sequencer, so it will not disturb a loaded song.
 
+## Getting music onto the piano
+
+The piano also exports an SMB share — the *PC Sharing Folder* — and that is the only route
+for adding your own MIDI. `DisklavierShare` covers it in the same async, typed idiom, so a
+consumer of this library can browse, upload and mirror without shelling out to `mount`.
+
+```python
+from aiodisklavier import Disklavier, DisklavierShare, PLAYABLE_SUFFIXES
+
+
+async with DisklavierShare("192.168.1.50") as share:
+    for entry in await share.async_list():
+        print(entry.path, entry.size, entry.modified)
+
+    await share.async_upload("doorbell.mid", "ImpromptuApp/doorbell.mid")
+
+    # Mirror a local library. Only what changed is sent, so repeat runs are cheap and an
+    # interrupted one resumes.
+    result = await share.async_sync_directory(
+        "~/Music/disklavier", "ImpromptuApp", suffixes=PLAYABLE_SUFFIXES
+    )
+
+if result.changed:
+    await piano.async_refresh_library()  # nothing is playable until the piano reindexes
+```
+
+| Area | Methods |
+|---|---|
+| Browsing | `async_list`, `async_walk`, `async_stat`, `async_exists`, `async_list_shares` |
+| Writing | `async_upload`, `async_upload_bytes`, `async_makedirs`, `async_rename` |
+| Reading | `async_download`, `async_download_bytes` |
+| Removing | `async_delete`, `async_remove_directory`, `async_delete_tree` |
+| Mirroring | `async_sync_directory` |
+
+Things worth knowing about the share, all covered in
+[docs/enspire-api.md §8](docs/enspire-api.md):
+
+- **It speaks SMB1 and nothing newer.** Samba 3.0.37 is the server *software*; SMB1/NT1 is
+  the newest protocol dialect it can offer, because Samba did not gain SMB2 until 3.6. An
+  SMB2 negotiate gets the socket closed. This is why the dependency is `pysmb` and not
+  `smbprotocol`, which starts at SMB 2.0.2 and cannot connect to the piano at all.
+- **The piano indexes exactly two folder levels.** `<folder>/<subfolder>/song.mid` is the
+  deepest path it will ever list, and each subfolder holding songs becomes an album.
+  Anything below that copies without complaint and then simply is not in the library — no
+  error from the write, none from the reindex. `async_sync_directory` logs a warning when it
+  uploads past the limit, but it will not restructure a tree for you:
+
+  ```text
+  ImpromptuApp/Frédéric Chopin/Ballade No. 1 in G Minor, Op. 23.mid   indexed
+  ImpromptuApp/maestro/Frédéric Chopin/Ballade No. 1 in G Minor.mid   invisible
+  ```
+- **Audio next to a MIDI file is that song's backing track.** `song.mid` + `song.wav` (or
+  `.mp3`) with matching basenames is one SMF+Audio song, not two: the keys play the MIDI,
+  the speakers play the audio, and the audio's length becomes the song's duration. Filter a
+  sync to `{".mid"}` and every transcription still copies, indexes and plays — as a bare
+  piano part with the band missing, silently. `PLAYABLE_SUFFIXES` includes audio for exactly
+  this reason, and `async_sync_directory` warns if it sends a MIDI whose companion was
+  filtered out.
+- **Never copy to the share from macOS directly.** Finder leaves a `._` AppleDouble stub
+  beside every file, the piano indexes those as songs in their own right, and loading one
+  silently resets the piano to the first built-in song. `async_sync_directory` excludes them
+  — along with `.DS_Store` and friends — by default.
+- **Nothing you upload is playable until you reindex** with `async_refresh_library`, and the
+  reindex reassigns song ids, so resolve songs by title afterwards rather than reusing an id.
+- **The share is served to guests** on stock firmware — no password, full write access. Same
+  trust model as the HTTP API: the LAN is the security boundary.
+- **Transfers are serial.** One SMB session carries one request, so `DisklavierShare`
+  serialises operations behind a lock. Use separate instances if you want parallelism.
+
 ## Two APIs, one preferred
 
 The piano exposes a versioned open API at `/api/1.0/<command>` and an internal, unversioned
@@ -101,6 +171,12 @@ response bodies are read against a size ceiling, redirects are refused, and devi
 strings are treated as data. The transport itself still has no confidentiality or
 integrity, so keep this traffic on a trusted network and do not expose the piano or this
 client across an untrusted one.
+
+The SMB share is the same picture, and a little worse: stock firmware serves it to guests
+with full write access, and SMB1 has no meaningful integrity protection. `DisklavierShare`
+refuses paths containing `..` or control characters before they reach the wire, so a
+device- or config-supplied path cannot be steered outside the share, and it never follows
+a name the server invents. Treat write access to the share as equivalent to LAN access.
 
 ## Development
 

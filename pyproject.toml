@@ -28,7 +28,14 @@ classifiers = [
   "Topic :: Home Automation",
   "Typing :: Typed",
 ]
-dependencies = ["aiohttp>=3.9", "yarl>=1.9"]
+dependencies = [
+  "aiohttp>=3.9",
+  "yarl>=1.9",
+  # pysmb rather than smbprotocol: the piano's Samba 3.0.37 speaks the SMB1/NT1 dialect and
+  # nothing newer, while smbprotocol supports SMB 2.0.2 upwards and cannot connect to the
+  # piano at all. See docs/enspire-api.md §8. Pure Python, so it costs nothing to require.
+  "pysmb>=1.2",
+]
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-cov>=5"]
@@ -129,3 +136,9 @@ enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 module = "tests.*"
 # Test bodies are exercised by running them; strict annotation adds little.
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+# pysmb ships no type information. The surface this library uses is pinned by the
+# SMBBackend protocol in aiodisklavier/share.py, which is checked normally.
+module = ["smb.*", "nmb.*"]
+ignore_missing_imports = true

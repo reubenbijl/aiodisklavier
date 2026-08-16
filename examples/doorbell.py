@@ -7,13 +7,21 @@ for it to finish, and restores playback -- volume included.
 
 One-time setup
 --------------
-1. Mount the piano's SMB share and drop a ``.mid`` into it. The share is guest-accessible::
+1. Put a ``.mid`` on the piano's SMB share. ``make_doorbell.py`` alongside this file
+   generates a two-note "ding-dong" if you need one::
 
-       # macOS
-       open "smb://<piano-ip>/PC%20Sharing%20Folder"
-       cp doorbell.mid "/Volumes/PC Sharing Folder/"
+       python -c "
+       import asyncio
+       from aiodisklavier import DisklavierShare
+       async def main():
+           async with DisklavierShare('<piano-ip>') as share:
+               await share.async_upload('doorbell.mid', 'doorbell.mid')
+       asyncio.run(main())"
 
-   ``make_doorbell.py`` alongside this file generates a two-note "ding-dong" if you need one.
+   Copy it from the Finder instead and macOS will leave a ``._doorbell.mid`` AppleDouble
+   stub beside it, which the piano indexes as a song in its own right -- and loading that
+   silently resets the piano to the first built-in song. ``DisklavierShare`` never writes
+   those.
 
 2. Reindex so the piano sees the new file (``async_refresh_library`` below, or the web UI's
    Songs -> PC Sharing -> DB Reload). The rescan reassigns song ids, which is why this
