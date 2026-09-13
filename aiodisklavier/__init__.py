@@ -45,6 +45,7 @@ from .exceptions import (
 from .models import (
     Album,
     CurrentInfo,
+    LibraryAlbum,
     LibrarySong,
     MasterState,
     PlaybackSnapshot,
@@ -64,7 +65,7 @@ from .share import (
     SyncResult,
 )
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 __all__ = [
     "AUDIO_SUFFIXES",
@@ -93,6 +94,7 @@ __all__ = [
     "DisklavierShareNotFoundError",
     "Genre",
     "GenreSelect",
+    "LibraryAlbum",
     "LibrarySong",
     "MasterState",
     "PlaybackSnapshot",

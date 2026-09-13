@@ -6,7 +6,7 @@ conversion once so callers never have to think about it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .const import (
@@ -196,6 +196,11 @@ class MasterState:
     #: :meth:`aiodisklavier.Disklavier.async_lookup_song`.
     song_prefix: str | None
     song_id: int | None
+    #: When the song library last changed, in milliseconds on the piano's clock
+    #: (``apictrl.update_window``). The firmware moves it when a reindex finishes and
+    #: leaves it alone for transport and volume changes, so a new value means any
+    #: listing read before it may be out of date.
+    library_updated: int | None = None
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> MasterState:
@@ -203,6 +208,7 @@ class MasterState:
         piano = _dict_or_empty(data.get("piano"))
         sbc = _dict_or_empty(data.get("sbc"))
         seq = _dict_or_empty(data.get("seq"))
+        apictrl = _dict_or_empty(data.get("apictrl"))
 
         repeat = _repeat_mode(data.get("repeat"))
 
@@ -225,6 +231,7 @@ class MasterState:
             tempo=_int_or_none(seq.get("tempo")),
             song_prefix=_str_or_none(seq.get("song_pfix")),
             song_id=_int_or_none(seq.get("song_id")),
+            library_updated=_int_or_none(apictrl.get("update_window")),
         )
 
 
@@ -322,6 +329,41 @@ class LibrarySong:
 
 
 @dataclass(frozen=True, slots=True)
+class LibraryAlbum:
+    """One album as the piano's own database describes it, from ``/ctrl/song.json``.
+
+    The same albums :meth:`~aiodisklavier.Disklavier.async_get_albums` lists, under the
+    same ids and titles -- a PC Sharing Folder album is titled by its folder's path on
+    the share -- but every library's albums arrive in the one database fetch, which the
+    piano serves several times faster than it builds an album listing.
+    """
+
+    prefix: str
+    album_id: int
+    title: str
+    #: Where the album lives on the piano's own storage; for a PC Sharing Folder album,
+    #: ``FromToPC/`` followed by its path on the share.
+    path: str | None
+    group: SongGroup | None
+
+    @classmethod
+    def from_json(cls, row: dict[str, Any]) -> LibraryAlbum | None:
+        """Build from one database row, or ``None`` for a row missing its identity."""
+        prefix = _str_or_none(row.get("pfix"))
+        album_id = _int_or_none(row.get("album_id"))
+        if prefix is None or album_id is None:
+            return None
+
+        return cls(
+            prefix=prefix,
+            album_id=album_id,
+            title=str(row.get("album_title", "")),
+            path=_str_or_none(row.get("album_path")),
+            group=PREFIX_TO_SONG_GROUP.get(prefix),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SongDatabase:
     """The piano's own song database, from ``/ctrl/song.json``.
 
@@ -335,6 +377,8 @@ class SongDatabase:
     #: re-indexed, so two fetches reporting the same value describe the same library.
     update: int | None
     songs: dict[str, LibrarySong]
+    #: Keyed like :attr:`songs`: library prefix, then album id -- ``f323``.
+    albums: dict[str, LibraryAlbum] = field(default_factory=dict)
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> SongDatabase:
@@ -344,7 +388,14 @@ class SongDatabase:
             song = LibrarySong.from_json(_dict_or_empty(row))
             if song is not None:
                 songs[str(key)] = song
-        return cls(update=_int_or_none(data.get("update")), songs=songs)
+
+        albums: dict[str, LibraryAlbum] = {}
+        for key, row in _dict_or_empty(data.get("album")).items():
+            album = LibraryAlbum.from_json(_dict_or_empty(row))
+            if album is not None:
+                albums[str(key)] = album
+
+        return cls(update=_int_or_none(data.get("update")), songs=songs, albums=albums)
 
     def lookup(self, prefix: str, song_id: int) -> LibrarySong | None:
         """Find one song by the identity the sequencer reports for it."""

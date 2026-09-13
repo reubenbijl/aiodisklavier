@@ -117,6 +117,7 @@ def test_master_state_parses() -> None:
     assert master.metronome_beat == "4/4"
     assert master.key_motion is True
     assert master.tempo == 100
+    assert master.library_updated == 1789281118522
 
 
 def test_master_state_tolerates_missing_blocks() -> None:
@@ -124,6 +125,7 @@ def test_master_state_tolerates_missing_blocks() -> None:
     master = MasterState.from_json({})
     assert master.repeat is None
     assert master.metronome_tempo is None
+    assert master.library_updated is None
 
 
 @pytest.mark.parametrize("junk", ["nope", 3, [1, 2], True])
@@ -133,10 +135,13 @@ def test_master_state_tolerates_non_dict_blocks(junk: object) -> None:
     master.json is internal and unversioned, so its shape is the one most likely to
     drift across firmware; a string where an object was expected must not raise.
     """
-    master = MasterState.from_json({"piano": junk, "sbc": junk, "seq": junk})
+    master = MasterState.from_json(
+        {"piano": junk, "sbc": junk, "seq": junk, "apictrl": junk}
+    )
     assert master.tempo is None
     assert master.headphone_connected is None
     assert master.metronome_tempo is None
+    assert master.library_updated is None
 
     snapshot = PlaybackSnapshot.from_master_json({"seq": junk})
     assert snapshot.has_song is False

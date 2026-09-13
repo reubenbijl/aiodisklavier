@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-09-13
+
+### Added
+
+- **Knowing when the library changed.** `MasterState.library_updated` reads
+  `apictrl.update_window` from `master.json`, a timestamp the firmware moves when a reindex
+  finishes and leaves alone for transport and volume changes. A client that already polls
+  master state can tell that song listings it holds are out of date without fetching
+  anything more — for instance, to refresh them in the background straight after a sync.
+- **Albums from the song database.** `SongDatabase.albums` parses the database's album rows
+  into `LibraryAlbum`: id, title, storage path and library, under the same ids and titles
+  `async_get_albums` reports. The piano serves the whole database several times faster than
+  it builds an album listing — 0.3 s against 1.8 s on a share of 304 albums — so finding a
+  folder by name no longer needs the slow listing.
+
 ## [0.2.1] — 2026-08-16
 
 ### Added
@@ -201,6 +216,9 @@ These shaped the API and are documented in `docs/enspire-api.md`:
 - Restoring playback stops first, because `load_song` changes the sequencer's selection
   without halting what is currently sounding.
 
-[Unreleased]: https://github.com/reubenbijl/aiodisklavier/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/reubenbijl/aiodisklavier/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/reubenbijl/aiodisklavier/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/reubenbijl/aiodisklavier/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/reubenbijl/aiodisklavier/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/reubenbijl/aiodisklavier/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/reubenbijl/aiodisklavier/releases/tag/v0.1.0

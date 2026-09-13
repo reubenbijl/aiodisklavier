@@ -336,6 +336,15 @@ reported), `ab_repeat`, `repeat`, `vol.headphone`, `mute`, `re_rec`, a full `pia
 auto-off), `system` (`master_tune`, `login_passcode`, `demo`), `msgbox` (modals the piano
 pushes at its client), `apictrl`, `radio`, `login`, `firmware`. **[live]**
 
+**`apictrl.update_window` stamps the library, not the state.** It is a millisecond timestamp
+on the piano's clock that moves when a reindex finishes, and nothing else seen so far moves
+it — transport and volume changes move the top-level `update_time` instead. So a client
+already polling `master.json` learns that song listings it holds are out of date without
+fetching anything more. Established by watching both stamps: eight seconds of idle reads
+changed neither; a `setRefreshDB.php` moved `update_time` twice and `update_window` once,
+about five seconds in, in step with `song.json`'s `update` counter; a volume change moved
+only `update_time`. **[live]**
+
 `performance.json` carries the mixer (`tg` `audio` `voice` `omni_in` `omni_out` `digital_out`
 `metronome` `rec_level` `rec_level_peak`) and `playfunc` (`trans` = transpose, `left_hand`,
 `right_hand`, `pedal`). **[live]**
@@ -351,6 +360,13 @@ audio-driven values (`play.js: updateTempoEnable()`), because a recorded backing
 the master clock — the same reason a stopped audio song reports `seq.tempo` as `0` where a
 MIDI song reports its scaling percentage. Album rows carry `coverart_path` under the HTTP
 root. **[live]**
+
+Album rows also carry `album_id`, `album_title` and `album_path`, and the ids and titles are
+the ones `get_album_list` reports — a PC Sharing Folder album is titled by its path on the
+share, and its `album_path` is that path under `FromToPC/`. That makes the database the fast
+way to find a folder by name: on a share of 304 albums it was served in 0.3 s, where
+`get_album_list&group=pc_sharing_folder` took 1.8 s every time. The file is being rewritten
+for a moment during a reindex, and a read then can fail mid-body. **[live]**
 
 ---
 

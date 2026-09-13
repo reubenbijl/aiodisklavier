@@ -86,6 +86,11 @@ MASTER_PAYLOAD = {
         "key_motion": "on",
     },
     "sbc": {"headphone": "disconnected", "usb": "connected"},
+    "apictrl": {
+        "exclusive_mode": "no",
+        "wait_ctrl": "no",
+        "update_window": "1789281118522",
+    },
 }
 
 # A miniature /ctrl/song.json: the sections the client reads, shaped as the firmware
@@ -149,6 +154,24 @@ SONG_DB_PAYLOAD = {
         },
         # A row with no identity: dropped during parsing.
         "broken": {"song_title": "No ids"},
+    },
+    "album": {
+        "d9": {
+            "pfix": "d",
+            "album_id": "9",
+            "album_title": "50 Greats for the Piano",
+            "album_path": "preset/09_Piano50",
+            "disp_order": "9",
+        },
+        "f22": {
+            "pfix": "f",
+            "album_id": "22",
+            "album_title": "HousePianistApp/to-review",
+            "album_path": "FromToPC/HousePianistApp/to-review",
+            "disp_order": "302",
+        },
+        # A row with no identity: dropped during parsing.
+        "broken": {"album_title": "No ids"},
     },
 }
 

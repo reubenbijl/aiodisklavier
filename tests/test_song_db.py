@@ -59,6 +59,38 @@ async def test_song_db_is_parsed_and_cached(
     )
 
 
+async def test_song_db_parses_albums(piano: Disklavier) -> None:
+    """Album rows come out keyed like songs, carrying their library and storage path.
+
+    A PC Sharing Folder album is titled by its folder's path on the share, which is what
+    lets a caller find a folder by name from this one fetch instead of the far slower
+    album listing.
+    """
+    db = await piano.async_get_song_db()
+
+    # Two rows carry an identity; the one with no ids is dropped.
+    assert set(db.albums) == {"d9", "f22"}
+    review = db.albums["f22"]
+    assert review.album_id == 22
+    assert review.title == "HousePianistApp/to-review"
+    assert review.path == "FromToPC/HousePianistApp/to-review"
+    assert review.group is SongGroup.PC_SHARING_FOLDER
+    assert db.albums["d9"].group is SongGroup.BUILT_IN_SONGS
+
+
+async def test_song_db_without_albums_parses(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """A database with no album section still yields its songs, and no albums."""
+    trimmed = json.loads(dumps(SONG_DB_PAYLOAD))
+    del trimmed["album"]
+    fake_piano.song_db_body = dumps(trimmed)
+
+    db = await piano.async_get_song_db()
+    assert db.albums == {}
+    assert db.lookup("d", 1) is not None
+
+
 async def test_lookup_miss_refreshes_once(
     piano: Disklavier, fake_piano: FakePiano
 ) -> None:
