@@ -499,6 +499,16 @@ security boundary — the same trust model as the HTTP API.
   either. **The audio drives the song length.** Both `.wav` (44.1 kHz, 16-bit stereo) and
   `.mp3` work.
 
+  **The match is by name prefix, not equality.** With `Song (Live).mid`, `Song (Live).mp3`,
+  `Song (Live) (filled).mid` and `Song (Live) (filled).mp3` in one folder, the filled song
+  indexes but plays bare: its audio is claimed by `Song (Live).mid`, whose basename is a
+  prefix of the audio's. Renaming the pair to `Song (Live, filled)` — so the original is no
+  longer a prefix — pairs it. Confirmed 2026-09-05 by loading each variant and reading
+  `duration_ms`: a paired song reports the audio's length, a bare one the MIDI's. A fresh
+  reindex, a byte-different audio file, and audio-before-MIDI upload order all made no
+  difference; the same files paired at once in a folder without the shorter-named sibling.
+  So a variant of a song that has audio must not extend the original's basename.
+
   The trap: filter a mirror to `{".mid"}` and every transcription still copies, still
   indexes, and still plays — as a bare piano part with the band missing. Nothing reports it.
   `aiodisklavier`'s `PLAYABLE_SUFFIXES` includes audio for this reason, and
