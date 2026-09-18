@@ -20,6 +20,7 @@ import asyncio
 import difflib
 import json
 import logging
+from contextlib import suppress
 from typing import Any, Final
 
 import aiohttp
@@ -30,6 +31,9 @@ from .const import (
     DEFAULT_TIMEOUT,
     JSON_RETRY_ATTEMPTS,
     JSON_RETRY_DELAY,
+    LOAD_POLL_INTERVAL,
+    LOAD_SETTLE,
+    LOAD_TIMEOUT,
     MAX_RESPONSE_BYTES,
     MAX_SONG_DB_BYTES,
     NOTIFY_POLL_INTERVAL,
@@ -45,10 +49,19 @@ from .const import (
     PATH_CURRENT_INFO,
     PATH_STATIC_INFO,
     PREFIX_TO_SONG_GROUP,
+    RADIO_CONNECT_POLL_INTERVAL,
+    RADIO_CONNECT_TIMEOUT,
+    RADIO_EXIT_POLL_INTERVAL,
+    RADIO_EXIT_TIMEOUT,
+    RESTORE_ATTEMPTS,
+    RESTORE_CHECK_DELAY,
+    SEEK_TOLERANCE_MS,
+    SEQUENCER_SETTLE,
     VOLUME_MAX,
     VOLUME_MIN,
     Genre,
     GenreSelect,
+    PlaybackStatus,
     PlaylistGroup,
     PowerStatus,
     QuietMode,
@@ -59,6 +72,7 @@ from .const import (
 from .exceptions import (
     DisklavierCommandError,
     DisklavierConnectionError,
+    DisklavierEnvelopeError,
     DisklavierError,
     DisklavierResponseError,
 )
@@ -152,6 +166,8 @@ class Disklavier:
         self._song_db: SongDatabase | None = None
         #: Song keys a fresh read of the database still lacked; see async_lookup_song.
         self._song_db_misses: set[str] = set()
+        #: Cached because asking is not free: see async_get_radio_channels.
+        self._radio_channels: tuple[RadioChannel, ...] | None = None
 
     @property
     def host(self) -> str:
@@ -177,27 +193,46 @@ class Disklavier:
         ``UnicodeDecodeError``.
 
         :raises DisklavierCommandError: the piano returned HTTP 400.
-        :raises DisklavierConnectionError: the piano was unreachable or timed out.
-        :raises DisklavierResponseError: the piano redirected, or the body ran past
-            ``max_bytes`` (:data:`~aiodisklavier.const.MAX_RESPONSE_BYTES` by default).
+        :raises DisklavierConnectionError: the piano was unreachable, timed out, or
+            answered HTTP 5xx.
+        :raises DisklavierResponseError: the piano redirected, answered any other HTTP
+            4xx, or the body ran past ``max_bytes``
+            (:data:`~aiodisklavier.MAX_RESPONSE_BYTES` by default).
         """
         url = self._base.with_path(path)
         try:
             async with self._session.get(
                 url, params=params, timeout=self._timeout, allow_redirects=False
             ) as response:
+                status = response.status
                 # The firmware signals every bad argument as a plain 400.
-                if response.status == 400:
+                if status == 400:
                     raise DisklavierCommandError(
                         f"Disklavier rejected request {url} with params {params}"
                     )
                 # Nothing this client calls ever redirects, and following one would
                 # hand the request to whatever host a spoofed piano names.
-                if 300 <= response.status < 400:
+                if 300 <= status < 400:
                     raise DisklavierResponseError(
-                        f"Disklavier redirected {url} unexpectedly ({response.status})"
+                        f"Disklavier redirected {url} unexpectedly ({status})",
+                        http_status=status,
                     )
-                response.raise_for_status()
+                # Any other 4xx is an answer, and the same one next time: most likely a
+                # 404 from a model or firmware that does not serve this endpoint. It must
+                # not be dressed as an outage, or a caller that retries outages -- as a
+                # poller naturally does -- retries it for ever.
+                if 400 < status < 500:
+                    raise DisklavierResponseError(
+                        f"Disklavier answered {url} with HTTP {status}",
+                        http_status=status,
+                    )
+                # A 5xx is the web server reporting that what sits behind it fell over:
+                # the HTTP layer failing, not the piano answering. Transient, so it goes
+                # with the faults worth retrying.
+                if status >= 500:
+                    raise DisklavierConnectionError(
+                        f"Disklavier at {self._host} answered {url} with HTTP {status}"
+                    )
                 # Read incrementally against a ceiling. A plain ``read()`` would buffer
                 # whatever the device chooses to stream; real payloads top out around a
                 # few hundred kB, so past the ceiling this is not the piano talking.
@@ -285,7 +320,7 @@ class Disklavier:
             error`` with ``error_info: "no song"`` -- as a normal reply. An empty library
             is a routine browse result the firmware happens to spell as an error, and its
             envelope still carries the (empty) list keys.
-        :raises DisklavierResponseError: the envelope carried any other ``status`` !=
+        :raises DisklavierEnvelopeError: the envelope carried any other ``status`` !=
             ``ok``. The exception's ``command`` and ``error_info`` attributes identify
             the failure without parsing the message.
         """
@@ -296,7 +331,7 @@ class Disklavier:
         error_info = data.get("error_info")
         if allow_empty and error_info == _EMPTY_LIBRARY_ERROR:
             return data
-        raise DisklavierResponseError(
+        raise DisklavierEnvelopeError(
             f"Disklavier command {command!r} failed: "
             f"{error_info or status or 'unknown error'}",
             command=command,
@@ -418,7 +453,16 @@ class Disklavier:
         await self.async_set_power(PowerStatus.SLEEP)
 
     async def async_set_quiet_mode(self, mode: QuietMode) -> None:
-        """Choose whether the hammers physically strike the strings."""
+        """Choose whether the hammers physically strike the strings.
+
+        Only :attr:`QuietMode.ACOUSTIC` and :attr:`QuietMode.QUIET` may be requested;
+        :attr:`QuietMode.HEADPHONE` is what the piano reports while headphones are plugged
+        in, and it answers HTTP 400 to a request for it.
+        """
+        if mode is QuietMode.HEADPHONE:
+            raise ValueError(
+                "HEADPHONE is reported by the piano, it cannot be requested"
+            )
         # Also valueless flags.
         await self._command("set_quiet_status", **{mode.value: _FLAG})
 
@@ -621,20 +665,40 @@ class Disklavier:
     # Radio
     # ------------------------------------------------------------------
 
-    async def async_get_radio_channels(self) -> list[RadioChannel]:
+    async def async_get_radio_channels(
+        self, *, refresh: bool = False
+    ) -> list[RadioChannel]:
         """List DisklavierRadio channels.
 
-        Where the service is unavailable, the piano answers with an error envelope; the
-        raised :class:`DisklavierResponseError` carries the envelope's ``error_info``.
+        **Asking interrupts playback.** This looks like a read and is not one: the piano
+        stops its sequencer to fetch the list, so a song that was playing falls silent and
+        one that was paused is rewound to the start. Confirmed on hardware both ways; only
+        a radio channel already playing carries on undisturbed. The list is therefore
+        cached on the client after the first read and served from there, so the
+        interruption happens at most once -- ideally at a moment of the caller's choosing,
+        with nothing playing. Pass ``refresh=True`` to read it again: the line-up does
+        change, and channel ids are only positions in it.
+
+        The request takes about two seconds, and a real read then waits for the
+        sequencer to finish the reset it set off: for a second or so afterwards the piano
+        is reloading its song and drops whatever it is sent, so without the wait a
+        ``load_song`` issued straight after this returned would be lost. Served from the
+        cache, it returns at once.
+
+        :raises DisklavierEnvelopeError: the service is unavailable -- in a region without
+            DisklavierRadio, say. ``error_info`` carries the piano's reason.
         """
-        data = await self._command_json("get_radio_channel_list")
-        return [
-            RadioChannel(
-                channel_id=int(row.get("channel_id", 0)),
-                title=str(row.get("channel_title", "")),
+        if refresh or self._radio_channels is None:
+            data = await self._command_json("get_radio_channel_list")
+            self._radio_channels = tuple(
+                RadioChannel(
+                    channel_id=int(row.get("channel_id", 0)),
+                    title=str(row.get("channel_title", "")),
+                )
+                for row in data.get("channel_list") or []
             )
-            for row in data.get("channel_list") or []
-        ]
+            await self._async_wait_until_loaded()
+        return list(self._radio_channels)
 
     # ------------------------------------------------------------------
     # Song database and search
@@ -659,7 +723,7 @@ class Disklavier:
         """Describe one song by the identity the sequencer reports for it.
 
         ``master.json`` names the loaded song as a library prefix and id (see
-        :attr:`~aiodisklavier.models.MasterState.song_prefix`); this joins that pair
+        :attr:`~aiodisklavier.MasterState.song_prefix`); this joins that pair
         against the song database. A miss refreshes the cached database once before
         giving up, because a fresh recording or a share re-index mints keys an older
         cache has never seen. A key the fresh database still lacks is remembered until
@@ -677,17 +741,26 @@ class Disklavier:
                 self._song_db_misses.add(key)
         return song
 
-    async def async_search(self, query: str, *, limit: int = 20) -> list[SearchResult]:
-        """Search songs, playlists and radio channels by title, best matches first.
+    async def async_search(
+        self, query: str, *, limit: int = 20, include_radio: bool = False
+    ) -> list[SearchResult]:
+        """Search songs and playlists by title, best matches first.
 
         Matching happens in this library rather than on the piano: the open API's
         ``search_title`` can only *play* its single fuzzy pick, never return
         candidates. Songs come from the song database, so one fetch covers every
-        library; playlists come from both playlist groups; radio channels are included
-        where the service exists -- a region without DisklavierRadio answers with an
-        error envelope, which here just means no radio results. Songs whose library
-        prefix maps to no open-API group are left out, so every result can actually be
-        played. Ties keep the piano's own ordering.
+        library; playlists come from both playlist groups. Songs whose library prefix
+        maps to no open-API group are left out, so every result can actually be played.
+        Ties keep the piano's own ordering.
+
+        :param include_radio: Search DisklavierRadio channels too. Off by default,
+            because the channel list is the one thing here that is not free to read:
+            fetching it stops whatever the piano is playing -- see
+            :meth:`async_get_radio_channels`. The list is cached once read, so this
+            costs an interruption at most once per client; read it at a quiet moment
+            first and searching with this set never interrupts anything. A region
+            without DisklavierRadio answers with an error envelope, which here just
+            means no radio results.
         """
         results: list[SearchResult] = []
 
@@ -717,10 +790,12 @@ class Disklavier:
                         )
                     )
 
-        try:
-            channels = await self.async_get_radio_channels()
-        except DisklavierResponseError:
-            channels = []
+        channels: list[RadioChannel] = []
+        if include_radio:
+            # Only the piano's considered "no": a truncated or oversized reply is a
+            # fault, and hiding it behind an empty result would bury it.
+            with suppress(DisklavierEnvelopeError):
+                channels = await self.async_get_radio_channels()
         for channel in channels:
             score = _match_score(query, channel.title)
             if score:
@@ -736,18 +811,87 @@ class Disklavier:
         results.sort(key=lambda result: result.score, reverse=True)
         return results[:limit]
 
-    async def async_play_radio(self, channel_id: int) -> None:
+    async def async_play_radio(self, channel_id: int, *, wait: bool = True) -> None:
         """Start a radio channel.
 
-        Whether transport and playback commands are honoured while radio is playing has
-        not been established on hardware -- treat their behaviour during radio as
-        unknown. See the "Not established" notes in ``docs/enspire-api.md``.
-        """
-        await self._command("play_radio", channel_id=str(channel_id))
+        The request itself takes two to four seconds, and music follows a few seconds
+        after that, while the piano connects.
 
-    async def async_stop_radio(self) -> None:
-        """Stop radio playback."""
-        await self._command("stop_radio")
+        **Radio is a mode, and it takes the piano over.** For as long as a channel is
+        active the piano answers ``play``, ``pause``, ``stop``, ``next_song`` and every
+        ``load_*`` and ``play_*`` command with HTTP 200 and ignores them. Volume still
+        works, and so does :meth:`async_seek`, which seeks within the song the channel is
+        playing. Only :meth:`async_stop_radio` ends it -- after which the piano is back
+        on the song that was loaded beforehand, stopped and rewound: a paused position
+        does not survive a visit to the radio. While it lasts,
+        :attr:`CurrentInfo.is_radio <aiodisklavier.CurrentInfo.is_radio>` is true and the
+        programme is reported by :meth:`async_get_master_state`.
+
+        By default this returns once the channel has connected, not when the piano
+        acknowledges the request: it polls the extended state until the channel is
+        named there -- four to seven seconds, in practice -- and gives up after twenty.
+        That is what makes it safe to follow with anything else. While it
+        connects the piano holds an exclusive "Connecting..." dialog over its own
+        interface, and the one time that dialog was seen to stick for good -- needing
+        a fresh radio connection to clear -- was after a ``stop_radio`` sent while it
+        was still up. The wait is best-effort, since it reads the internal
+        ``master.json``: if that cannot be read, this returns as if ``wait`` were off.
+
+        :param wait: Pass ``False`` to return on the piano's acknowledgement instead.
+        :raises DisklavierEnvelopeError: the piano declined -- ``error_info`` is
+            ``"no subscription"`` for a channel the account does not include. Note that
+            a declined request still ends whatever channel was already playing.
+        """
+        await self._command_json("play_radio", channel_id=str(channel_id))
+        if not wait:
+            return
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + RADIO_CONNECT_TIMEOUT
+        while loop.time() < deadline:
+            try:
+                master = await self.async_get_master_state()
+            except DisklavierError as err:
+                _LOGGER.debug("Cannot watch the radio connect (%s), not waiting", err)
+                return
+            if master.radio_channel is not None:
+                return
+            await asyncio.sleep(RADIO_CONNECT_POLL_INTERVAL)
+        _LOGGER.debug(
+            "Radio still connecting after %.1fs, carrying on", RADIO_CONNECT_TIMEOUT
+        )
+
+    async def async_stop_radio(self, *, wait: bool = True) -> None:
+        """Stop radio playback, returning once the piano will take a command again.
+
+        The piano answers ``stop_radio`` within half a second and then goes on ignoring
+        commands for about a second more, while it reloads the song it had before the
+        radio. A ``play_song`` sent straight after the reply is accepted with HTTP 200 and
+        dropped -- found on hardware, where a notification sent that way never sounded. So
+        by default this does not return on the reply: it polls ``current_info`` until the
+        piano reports neither ``radio`` nor ``load`` -- about a second, in practice --
+        and gives up after five, carrying on either way.
+
+        With no radio playing the piano still answers ``ok``, a paused song is left where
+        it was, and the first poll returns at once.
+
+        :param wait: Pass ``False`` to return on the piano's reply instead -- for a
+            caller that has nothing to send next, or does its own waiting.
+        """
+        await self._command_json("stop_radio")
+        if not wait:
+            return
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + RADIO_EXIT_TIMEOUT
+        while loop.time() < deadline:
+            info = await self.async_get_current_info()
+            if info.playback_status not in (PlaybackStatus.RADIO, PlaybackStatus.LOAD):
+                return
+            await asyncio.sleep(RADIO_EXIT_POLL_INTERVAL)
+        _LOGGER.debug(
+            "Piano still leaving radio after %.1fs, carrying on", RADIO_EXIT_TIMEOUT
+        )
 
     # ------------------------------------------------------------------
     # Snapshot and restore
@@ -771,33 +915,152 @@ class Disklavier:
         ``control="play"`` in the firmware, so using it would start playback rather than
         merely reselect. ``load_song`` cues the song silently.
 
-        A snapshot with no song loaded, or one whose library prefix is not recognised, is
-        skipped rather than guessed at.
+        A snapshot taken while a radio channel was playing puts the channel back on. The
+        state file names the channel only by title, so it is looked up in the channel
+        list -- see :meth:`async_get_radio_channels` -- and a channel that has since left
+        the line-up is logged and skipped, leaving the piano cued on its song and quiet.
+
+        A snapshot with nothing to go back to -- no song loaded, or one whose library
+        prefix is not recognised, and no radio -- is skipped rather than guessed at.
         """
-        if not snapshot.has_song:
+        group: SongGroup | None = None
+        if snapshot.has_song:
+            assert snapshot.song_prefix is not None
+            group = PREFIX_TO_SONG_GROUP.get(snapshot.song_prefix)
+            if group is None:
+                _LOGGER.debug(
+                    "Cannot restore the song: unrecognised library prefix %r",
+                    snapshot.song_prefix,
+                )
+        if group is None and snapshot.radio_channel is None:
             return
 
-        assert snapshot.song_prefix is not None
-        assert snapshot.song_id is not None
+        # Radio that is on *now* has to go first, whatever the snapshot holds: the piano
+        # answers every command below with HTTP 200 and ignores it while radio is active,
+        # so a restore issued over it would report success and change nothing.
+        info = await self.async_get_current_info()
+        if info.is_radio:
+            await self.async_stop_radio()
 
-        group = PREFIX_TO_SONG_GROUP.get(snapshot.song_prefix)
-        if group is None:
-            _LOGGER.debug(
-                "Cannot restore playback: unrecognised library prefix %r",
-                snapshot.song_prefix,
-            )
-            return
+        # Resolved before anything is cued, because reading the channel list resets the
+        # sequencer -- done afterwards, it would rewind the song just put in place.
+        channel: RadioChannel | None = None
+        if snapshot.radio_channel is not None:
+            channel = await self._async_find_radio_channel(snapshot.radio_channel)
 
         # Stop first. 'load_song' only changes the sequencer's selection -- it does not
         # halt whatever is currently sounding. Restoring over a still-playing song
         # otherwise leaves the piano audibly playing one song while reporting another.
-        await self.async_stop()
+        # Not when it is stopped already, though -- as it is coming out of radio, and
+        # straight after a notification has been silenced. The sequencer is happiest
+        # sent as little as possible.
+        if not info.is_radio and not info.is_stopped:
+            await self._async_stop_and_settle()
 
-        await self.async_play_song(snapshot.song_id, group, load_only=True)
-        if snapshot.position_ms:
-            await self.async_seek(snapshot.position_ms)
-        if snapshot.was_playing:
+        resume = channel is None and snapshot.was_playing
+        if group is not None:
+            assert snapshot.song_id is not None
+            await self.async_play_song(snapshot.song_id, group, load_only=True)
+            if snapshot.position_ms or resume or channel is not None:
+                # The sequencer drops what it is sent while it loads, so nothing that
+                # follows -- the seek, the play, or the radio -- goes out until it has
+                # finished. Skipped only when cueing the song was all there was to do.
+                await self._async_wait_until_loaded()
+            if snapshot.position_ms:
+                await self._async_seek_until_kept(snapshot.position_ms)
+
+        if channel is not None:
+            await self.async_play_radio(channel.channel_id)
+        elif group is not None and resume:
+            await self._async_play_until_kept()
+
+    async def _async_stop_and_settle(self) -> None:
+        """Stop, and leave the sequencer a moment before it is sent anything else.
+
+        See :data:`~aiodisklavier.const.SEQUENCER_SETTLE` for why.
+        """
+        await self.async_stop()
+        await asyncio.sleep(SEQUENCER_SETTLE)
+
+    async def _async_wait_until_loaded(self) -> None:
+        """Wait for a song that was just cued to finish loading.
+
+        Found on hardware: ``load_song`` answers at once and the sequencer then spends
+        about two seconds loading, during which a seek or a ``play`` is accepted with HTTP
+        200 and dropped. A restore that sent them back to back put the right song up and
+        left it at the start, stopped -- for every song, not just slow ones.
+        """
+        # State lags a command: for the first second or so the piano still reports the
+        # state from before the load, which would read here as "not loading, go ahead".
+        await asyncio.sleep(LOAD_SETTLE)
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + LOAD_TIMEOUT
+        while loop.time() < deadline:
+            info = await self.async_get_current_info()
+            if info.playback_status is not PlaybackStatus.LOAD:
+                return
+            await asyncio.sleep(LOAD_POLL_INTERVAL)
+        _LOGGER.debug("Song still loading after %.1fs, carrying on", LOAD_TIMEOUT)
+
+    async def _async_seek_until_kept(self, position_ms: int) -> None:
+        """Seek a cued song, checking the piano kept it and asking again if not.
+
+        The wait above is a judgement about timing on one piano. This is the check that
+        does not depend on it: the position is read back, and a seek that was dropped is
+        simply sent again. Seeking is idempotent, so a repeat costs nothing.
+        """
+        for _ in range(RESTORE_ATTEMPTS):
+            await self.async_seek(position_ms)
+            await asyncio.sleep(RESTORE_CHECK_DELAY)
+            position = (await self.async_get_current_info()).position_ms
+            if (
+                position is not None
+                and abs(position - position_ms) <= SEEK_TOLERANCE_MS
+            ):
+                return
+        _LOGGER.debug(
+            "Piano did not keep a seek to %d ms after %d attempts",
+            position_ms,
+            RESTORE_ATTEMPTS,
+        )
+
+    async def _async_play_until_kept(self) -> None:
+        """Start a cued song, checking the piano took it and asking again if not."""
+        for _ in range(RESTORE_ATTEMPTS):
             await self.async_play()
+            await asyncio.sleep(RESTORE_CHECK_DELAY)
+            if (await self.async_get_current_info()).is_playing:
+                return
+        _LOGGER.debug("Piano did not start playing after %d attempts", RESTORE_ATTEMPTS)
+
+    async def _async_find_radio_channel(self, title: str) -> RadioChannel | None:
+        """Resolve a channel title back to a channel, or ``None`` with a warning.
+
+        A miss against a cached line-up re-reads it once: channels come and go, and the
+        cache may simply predate this one.
+        """
+        was_cached = self._radio_channels is not None
+        try:
+            channels = await self.async_get_radio_channels()
+            match = next((c for c in channels if c.title == title), None)
+            if match is None and was_cached:
+                channels = await self.async_get_radio_channels(refresh=True)
+                match = next((c for c in channels if c.title == title), None)
+        except DisklavierEnvelopeError as err:
+            _LOGGER.warning(
+                "Cannot put radio channel %r back on: the piano would not list its "
+                "channels (%s)",
+                title,
+                err.error_info,
+            )
+            return None
+        if match is None:
+            _LOGGER.warning(
+                "Cannot put radio channel %r back on: it is no longer in the line-up",
+                title,
+            )
+        return match
 
     async def async_notify(
         self,
@@ -817,12 +1080,18 @@ class Disklavier:
         Specify the song either by ``song_id`` plus ``group``, or by ``search_title``.
 
         :param volume: Play at this volume, restoring the previous one afterwards.
-        :param restore: Restore the previously loaded song and position when done.
+        :param restore: Restore what was there before when done: the loaded song and its
+            position, or the radio channel that was playing.
         :param wait_timeout: Give up waiting for the notification to finish after this many
             seconds and restore anyway.
 
         Note that this takes over the sequencer. For a short sound that leaves playback
         untouched, use :meth:`async_play_test_chord` instead.
+
+        A radio channel that is playing is ended first, because the piano ignores every
+        play command while radio is on -- without that the notification would be accepted
+        with HTTP 200 and never sound. With ``restore`` the channel is put back on
+        afterwards; without it, radio stays off.
         """
         if (song_id is None or group is None) and not search_title:
             raise ValueError(
@@ -831,15 +1100,22 @@ class Disklavier:
 
         snapshot = await self.async_snapshot_playback() if restore else None
 
-        previous_volume: int | None = None
-        if volume is not None:
-            previous_volume = (await self.async_get_current_info()).volume
+        # Read every time, not just for the volume: this is also the open API's own word
+        # on whether radio is on, which matters whether or not anything is restored.
+        info = await self.async_get_current_info()
+        previous_volume = info.volume if volume is not None else None
 
         took_over = False
         try:
             # Inside the try, so that a failure here still triggers the restore below.
             if volume is not None:
                 await self.async_set_volume(volume)
+
+            if info.is_radio:
+                await self.async_stop_radio()
+                # From here the user's radio is off, so there is no longer anything of
+                # theirs for the silencing stop below to spare.
+                took_over = True
 
             if search_title:
                 await self.async_play_search(search_title, single=True)
@@ -863,7 +1139,7 @@ class Disklavier:
             # and stopping it here would kill playback this method cannot always
             # restore.
             if took_over and (previous_volume is not None or snapshot is not None):
-                await self._async_try_restore(self.async_stop(), "silence")
+                await self._async_try_restore(self._async_stop_and_settle(), "silence")
             if previous_volume is not None:
                 await self._async_try_restore(
                     self.async_set_volume(previous_volume), "volume"
@@ -889,7 +1165,11 @@ class Disklavier:
         deadline = asyncio.get_running_loop().time() + timeout
         while asyncio.get_running_loop().time() < deadline:
             info = await self.async_get_current_info()
-            if not info.is_playing:
+            # 'load' is the sequencer still fetching the song, not the song having
+            # finished. It outlasts the settle on the way out of radio -- about two
+            # seconds on hardware -- and reading it as quiet would have the restore stop
+            # the notification before its first note.
+            if not info.is_playing and info.playback_status is not PlaybackStatus.LOAD:
                 return
             await asyncio.sleep(NOTIFY_POLL_INTERVAL)
 

@@ -13,6 +13,7 @@ from aiodisklavier import (
     Disklavier,
     DisklavierCommandError,
     DisklavierConnectionError,
+    DisklavierEnvelopeError,
     DisklavierResponseError,
     PlaylistGroup,
     PowerStatus,
@@ -23,7 +24,7 @@ from aiodisklavier import (
 from aiodisklavier import client as client_module
 from aiodisklavier.const import JSON_RETRY_ATTEMPTS, MAX_RESPONSE_BYTES, PATH_API_BASE
 
-from .conftest import CURRENT_INFO_PAYLOAD, FakePiano, dumps
+from .conftest import CURRENT_INFO_PAYLOAD, FakePiano, dumps, radio_channel_list
 
 # ----------------------------------------------------------------------
 # State
@@ -128,11 +129,48 @@ async def test_error_envelope_raises_structured_response_error(
     200. The exception's attributes let callers tell such envelopes apart without
     parsing the message string.
     """
-    fake_piano.command_body = dumps({"status": "error", "error_info": "not available"})
-    with pytest.raises(DisklavierResponseError, match="not available") as excinfo:
+    fake_piano.command_body_for = {
+        "get_radio_channel_list": dumps(
+            {"status": "error", "error_info": "not available"}
+        )
+    }
+    with pytest.raises(DisklavierEnvelopeError, match="not available") as excinfo:
         await piano.async_get_radio_channels()
     assert excinfo.value.command == "get_radio_channel_list"
     assert excinfo.value.error_info == "not available"
+    # It is the piano's answer rather than a fault in the HTTP exchange.
+    assert excinfo.value.http_status is None
+
+
+async def test_envelope_error_is_still_a_response_error(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """Code written before the envelope got its own class keeps catching it.
+
+    ``DisklavierEnvelopeError`` narrows ``DisklavierResponseError`` rather than replacing
+    it, and the fields earlier releases exposed on the parent are still read from there.
+    """
+    fake_piano.command_body_for = {
+        "get_radio_channel_list": dumps({"status": "error", "error_info": "nope"})
+    }
+    with pytest.raises(DisklavierResponseError) as excinfo:
+        await piano.async_get_radio_channels()
+    assert excinfo.value.error_info == "nope"
+
+
+async def test_a_malformed_reply_is_not_an_envelope_error(
+    piano: Disklavier, fake_piano: FakePiano, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Garbage on the wire must not be catchable as the piano declining.
+
+    This is the distinction the subclass exists for: a caller that treats "the radio
+    service said no" as routine would otherwise swallow a truncated reply along with it.
+    """
+    monkeypatch.setattr(client_module, "JSON_RETRY_DELAY", 0.0)
+    fake_piano.command_body_for = {"get_radio_channel_list": '{"status": "ok", "chan'}
+    with pytest.raises(DisklavierResponseError) as excinfo:
+        await piano.async_get_radio_channels()
+    assert not isinstance(excinfo.value, DisklavierEnvelopeError)
 
 
 async def test_invalid_json_raises_response_error(
@@ -230,8 +268,9 @@ async def test_redirect_is_refused(piano: Disklavier, fake_piano: FakePiano) -> 
     """
     fake_piano.command_status = 302
     fake_piano.command_headers = {"Location": f"{PATH_API_BASE}/current_info"}
-    with pytest.raises(DisklavierResponseError, match="redirected"):
+    with pytest.raises(DisklavierResponseError, match="redirected") as excinfo:
         await piano.async_play()
+    assert excinfo.value.http_status == 302
     # The Location target must never have been fetched.
     assert len(fake_piano.requests) == 1
 
@@ -276,13 +315,46 @@ async def test_server_error_raises_connection_error(
 ) -> None:
     """A 5xx is a transport-level fault, mapped like any other client error.
 
-    Only 400 carries firmware meaning (a rejected argument); anything else in the
-    error range is the HTTP layer misbehaving, not the piano answering.
+    The web server answers 5xx when what sits behind it has fallen over: the HTTP layer
+    misbehaving, not the piano answering. Transient, so it belongs with the faults a
+    caller retries.
     """
     fake_piano.command_status = status
     fake_piano.command_body = "boom"
-    with pytest.raises(DisklavierConnectionError):
+    with pytest.raises(DisklavierConnectionError, match=str(status)):
         await piano.async_play()
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 405])
+async def test_other_client_errors_are_answers_not_outages(
+    piano: Disklavier, fake_piano: FakePiano, status: int
+) -> None:
+    """A 4xx other than 400 is the piano's answer, and must not look like an outage.
+
+    These used to fall through ``raise_for_status`` into ``DisklavierConnectionError``,
+    which is the error a poller treats as "unreachable, try again" -- so a firmware
+    that simply does not serve an endpoint would have been retried for ever, and
+    reported as offline, rather than recognised as unsupported.
+    """
+    fake_piano.command_status = status
+    with pytest.raises(DisklavierResponseError) as excinfo:
+        await piano.async_play()
+    assert excinfo.value.http_status == status
+    assert not isinstance(excinfo.value, DisklavierEnvelopeError)
+
+
+async def test_a_missing_internal_endpoint_is_a_response_error(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """The case the mapping exists for: a piano without ``/ctrl/master.json``.
+
+    The internal endpoints are unversioned, so they are where another model or firmware
+    is most likely to differ. A 404 there says "not on this piano", once and for all.
+    """
+    fake_piano.ctrl_status = 404
+    with pytest.raises(DisklavierResponseError) as excinfo:
+        await piano.async_get_master_state()
+    assert excinfo.value.http_status == 404
 
 
 async def test_connection_drop_mid_body_raises_connection_error(
@@ -393,6 +465,19 @@ async def test_quiet_mode_uses_valueless_flag(
     assert fake_piano.last.query["quiet"] == ""
 
 
+async def test_headphone_mode_cannot_be_requested(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """HEADPHONE is reported while headphones are plugged in, never commanded.
+
+    Confirmed on hardware: ``set_quiet_status?headphone`` answers HTTP 400. Refused here
+    so the failure is local and says why.
+    """
+    with pytest.raises(ValueError, match="HEADPHONE"):
+        await piano.async_set_quiet_mode(QuietMode.HEADPHONE)
+    assert fake_piano.requests == []
+
+
 async def test_seek_uses_internal_endpoint(
     piano: Disklavier, fake_piano: FakePiano
 ) -> None:
@@ -471,15 +556,77 @@ async def test_get_playlists(piano: Disklavier, fake_piano: FakePiano) -> None:
 
 async def test_get_radio_channels(piano: Disklavier, fake_piano: FakePiano) -> None:
     """Radio channels are parsed."""
-    fake_piano.command_body = dumps(
-        {
-            "status": "ok",
-            "channel_list": [{"channel_id": 1, "channel_title": "Sampler"}],
-        }
-    )
+    fake_piano.command_body_for = {
+        "get_radio_channel_list": radio_channel_list(
+            [{"channel_id": 1, "channel_title": "Sampler"}]
+        )
+    }
     channels = await piano.async_get_radio_channels()
     assert channels[0].channel_id == 1
     assert channels[0].title == "Sampler"
+
+
+async def test_radio_channels_are_read_once(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """The channel list is cached, because asking for it is not free.
+
+    Found on hardware: ``get_radio_channel_list`` stops the sequencer. A song that was
+    playing fell silent and one paused at 34 s came back rewound to zero, every time.
+    So the list is read once and served from the client after that, and a caller can
+    choose the moment the one interruption happens.
+    """
+    first = await piano.async_get_radio_channels()
+    second = await piano.async_get_radio_channels()
+    assert first == second
+    asked = [r for r in fake_piano.requests if r.command == "get_radio_channel_list"]
+    assert len(asked) == 1
+    # A caller that mutates its copy does not reach the cache.
+    first.clear()
+    assert await piano.async_get_radio_channels() == second
+
+
+async def test_reading_the_radio_channels_waits_out_the_reset_it_causes(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """A real read returns once the sequencer has finished reloading, not before.
+
+    From hardware: for a second or so after the list arrives the piano reports ``load``
+    and drops what it is sent. A restore that read the list and cued a song straight
+    after had the cue ignored, and the piano was left on the wrong song.
+    """
+    statuses = iter(["load", "load", "pause"])
+
+    def _advance() -> None:
+        fake_piano.current_body = dumps(
+            {**CURRENT_INFO_PAYLOAD, "playback_status": next(statuses, "pause")}
+        )
+
+    _advance()
+    fake_piano.on_current_info = _advance
+
+    await piano.async_get_radio_channels()
+    commands = [request.command for request in fake_piano.requests]
+    assert commands == ["get_radio_channel_list"] + ["current_info"] * 3
+
+    # Served from the cache there is no reset, so nothing to wait for.
+    await piano.async_get_radio_channels()
+    assert len(fake_piano.requests) == 4
+
+
+async def test_radio_channels_can_be_re_read(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """``refresh=True`` re-reads: the line-up changes, and ids are positions in it."""
+    assert [c.channel_id for c in await piano.async_get_radio_channels()] == [1, 31]
+    fake_piano.command_body_for = {
+        "get_radio_channel_list": radio_channel_list(
+            [{"channel_id": 30, "channel_title": "Chopin"}]
+        )
+    }
+    assert [c.channel_id for c in await piano.async_get_radio_channels()] == [1, 31]
+    refreshed = await piano.async_get_radio_channels(refresh=True)
+    assert [c.channel_id for c in refreshed] == [30]
 
 
 async def test_play_song_load_only(piano: Disklavier, fake_piano: FakePiano) -> None:

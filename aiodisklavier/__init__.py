@@ -3,20 +3,33 @@
 Two ways in, and you need both: :class:`Disklavier` drives the piano over HTTP, and
 :class:`DisklavierShare` reaches its SMB share, which is the only route for putting your own
 MIDI on the instrument.
+
+**What is public.** The names in ``__all__`` below, imported from ``aiodisklavier`` itself,
+are the API, and they are what the version number makes promises about. The submodules they
+live in -- ``aiodisklavier.client``, ``.const``, ``.models``, ``.share``, ``.exceptions`` --
+are an implementation detail: they may be rearranged in any release, as may anything
+spelled with a leading underscore. See the README's *Stability* section.
 """
 
 from __future__ import annotations
 
 from .client import Disklavier
 from .const import (
+    API_VERSION,
     AUDIO_SUFFIXES,
     DEFAULT_EXCLUDES,
     DEFAULT_PORT,
+    DEFAULT_TIMEOUT,
     INDEXED_DEPTH_LIMIT,
+    MAX_RESPONSE_BYTES,
+    MAX_SONG_DB_BYTES,
+    NOTIFY_WAIT_TIMEOUT,
     PLAYABLE_SUFFIXES,
+    PREFIX_TO_SONG_GROUP,
     SHARE_ENSPIRE_CONTROLLER,
     SHARE_PC_SHARING,
     SMB_PORT,
+    SMB_TIMEOUT,
     UPNP_DEVICE_TYPE,
     VOLUME_MAX,
     VOLUME_MIN,
@@ -35,6 +48,7 @@ from .const import (
 from .exceptions import (
     DisklavierCommandError,
     DisklavierConnectionError,
+    DisklavierEnvelopeError,
     DisklavierError,
     DisklavierResponseError,
     DisklavierShareAuthError,
@@ -59,6 +73,7 @@ from .models import (
 from .share import (
     DisklavierShare,
     ShareEntry,
+    SMBBackend,
     SyncAction,
     SyncFailure,
     SyncProgress,
@@ -68,14 +83,21 @@ from .share import (
 __version__ = "0.2.3"
 
 __all__ = [
+    "API_VERSION",
     "AUDIO_SUFFIXES",
     "DEFAULT_EXCLUDES",
     "DEFAULT_PORT",
+    "DEFAULT_TIMEOUT",
     "INDEXED_DEPTH_LIMIT",
+    "MAX_RESPONSE_BYTES",
+    "MAX_SONG_DB_BYTES",
+    "NOTIFY_WAIT_TIMEOUT",
     "PLAYABLE_SUFFIXES",
+    "PREFIX_TO_SONG_GROUP",
     "SHARE_ENSPIRE_CONTROLLER",
     "SHARE_PC_SHARING",
     "SMB_PORT",
+    "SMB_TIMEOUT",
     "UPNP_DEVICE_TYPE",
     "VOLUME_MAX",
     "VOLUME_MIN",
@@ -85,6 +107,7 @@ __all__ = [
     "Disklavier",
     "DisklavierCommandError",
     "DisklavierConnectionError",
+    "DisklavierEnvelopeError",
     "DisklavierError",
     "DisklavierResponseError",
     "DisklavierShare",
@@ -105,6 +128,7 @@ __all__ = [
     "QuietMode",
     "RadioChannel",
     "RepeatMode",
+    "SMBBackend",
     "SearchKind",
     "SearchResult",
     "ShareEntry",

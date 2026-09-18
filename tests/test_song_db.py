@@ -15,9 +15,16 @@ from aiodisklavier import (
     SongFormat,
     SongGroup,
 )
+from aiodisklavier import client as client_module
 from aiodisklavier.client import _match_score
 
-from .conftest import SONG_DB_PAYLOAD, FakePiano, dumps, ok_envelope
+from .conftest import (
+    SONG_DB_PAYLOAD,
+    FakePiano,
+    dumps,
+    ok_envelope,
+    radio_channel_list,
+)
 
 # ----------------------------------------------------------------------
 # Database fetch and parsing
@@ -193,20 +200,24 @@ async def test_unknown_format_degrades_to_none(
 async def test_search_ranks_and_spans_kinds(
     piano: Disklavier, fake_piano: FakePiano
 ) -> None:
-    """Search covers songs, playlists and radio, best matches first."""
+    """Search covers songs, playlists and -- when asked -- radio, best matches first."""
     fake_piano.command_body = ok_envelope(
         playlist_list=[
             {"playlist_id": 3, "playlist_title": "Clair de lune covers"},
             # And one that does not match, which must simply not appear.
             {"playlist_id": 4, "playlist_title": "Morning Coffee"},
-        ],
-        channel_list=[
-            {"channel_id": 5, "channel_title": "Clair de lune Radio"},
-            {"channel_id": 6, "channel_title": "Hot Country Hits"},
-        ],
+        ]
     )
+    fake_piano.command_body_for = {
+        "get_radio_channel_list": radio_channel_list(
+            [
+                {"channel_id": 5, "channel_title": "Clair de lune Radio"},
+                {"channel_id": 6, "channel_title": "Hot Country Hits"},
+            ]
+        )
+    }
 
-    results = await piano.async_search("Clair de lune")
+    results = await piano.async_search("Clair de lune", include_radio=True)
 
     assert results[0].kind is SearchKind.SONG
     assert results[0].title == "Clair de lune"
@@ -234,6 +245,39 @@ async def test_search_ranks_and_spans_kinds(
     assert all(result.song is None or result.song.prefix != "q" for result in results)
 
 
+async def test_search_does_not_touch_the_radio_unless_asked(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """A plain search must never read the channel list, because doing so stops the music.
+
+    Found on hardware: ``get_radio_channel_list`` stops the sequencer -- a playing song
+    falls silent, a paused one is rewound. Search used to read it on every call, so
+    every search from a media browser stopped whatever the piano was playing.
+    """
+    fake_piano.command_body = ok_envelope(playlist_list=[])
+
+    results = await piano.async_search("Clair")
+
+    assert results
+    assert all(result.kind is not SearchKind.RADIO for result in results)
+    assert "get_radio_channel_list" not in [r.command for r in fake_piano.requests]
+
+
+async def test_searching_the_radio_reads_the_channel_list_once(
+    piano: Disklavier, fake_piano: FakePiano
+) -> None:
+    """With radio included, the interruption happens at most once per client."""
+    fake_piano.command_body = ok_envelope(playlist_list=[])
+
+    first = await piano.async_search("Chopin", include_radio=True)
+    second = await piano.async_search("Chopin", include_radio=True)
+
+    assert [r.kind for r in first] == [SearchKind.RADIO]
+    assert first == second
+    asked = [r for r in fake_piano.requests if r.command == "get_radio_channel_list"]
+    assert len(asked) == 1
+
+
 async def test_search_without_radio_still_answers(
     piano: Disklavier, fake_piano: FakePiano
 ) -> None:
@@ -245,9 +289,25 @@ async def test_search_without_radio_still_answers(
         )
     }
 
-    results = await piano.async_search("Clair")
+    results = await piano.async_search("Clair", include_radio=True)
     assert results
     assert all(result.kind is not SearchKind.RADIO for result in results)
+
+
+async def test_search_does_not_hide_a_broken_channel_list(
+    piano: Disklavier, fake_piano: FakePiano, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the piano's considered "no" means "no radio results".
+
+    A truncated reply is a fault. Search used to catch the broad response error around
+    the radio read, which would have buried it behind an ordinary-looking result.
+    """
+    monkeypatch.setattr(client_module, "JSON_RETRY_DELAY", 0.0)
+    fake_piano.command_body = ok_envelope(playlist_list=[])
+    fake_piano.command_body_for = {"get_radio_channel_list": '{"status": "ok", "ch'}
+
+    with pytest.raises(DisklavierResponseError):
+        await piano.async_search("Clair", include_radio=True)
 
 
 async def test_search_respects_the_limit(

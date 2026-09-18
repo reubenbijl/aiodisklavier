@@ -206,7 +206,7 @@ def _timestamp(value: float) -> datetime:
 # ----------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ShareEntry:
     """One file or directory on the share."""
 
@@ -257,7 +257,7 @@ class SyncAction(StrEnum):
     FAIL = "fail"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SyncProgress:
     """One step of a sync, handed to the ``progress`` callback as it happens.
 
@@ -273,7 +273,7 @@ class SyncProgress:
     total: int
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SyncFailure:
     """One path a sync could not transfer, collected when ``continue_on_error`` is set."""
 
@@ -281,7 +281,7 @@ class SyncFailure:
     error: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SyncResult:
     """What a sync did, as share-relative paths."""
 
@@ -1061,7 +1061,7 @@ class DisklavierShare:
         nothing to be gained by launching them together.
 
         **Mind the depth.** The piano's indexer descends only
-        :data:`~aiodisklavier.const.INDEXED_DEPTH_LIMIT` folder levels, so
+        :data:`~aiodisklavier.INDEXED_DEPTH_LIMIT` folder levels, so
         ``<folder>/<subfolder>/song.mid`` is the deepest path it will ever list. Anything
         below that copies without complaint and never appears in the library; this method
         logs a warning when it happens, but cannot flatten a tree on the caller's behalf.
@@ -1069,13 +1069,13 @@ class DisklavierShare:
         :param local_dir: The directory to mirror.
         :param remote_dir: Where to put it. The default is the share root.
         :param suffixes: Only upload files with these extensions, matched without regard to
-            case. :data:`~aiodisklavier.const.PLAYABLE_SUFFIXES` is the set to reach for --
+            case. :data:`~aiodisklavier.PLAYABLE_SUFFIXES` is the set to reach for --
             note that it includes audio, because a ``song.wav`` or ``song.mp3`` beside a
             ``song.mid`` is that song's backing track rather than a separate song. Narrowing
             this to ``{".mid"}`` leaves every transcription playing bare; a warning is
             logged when that happens.
         :param exclude: Glob patterns matched against each path component. The default,
-            :data:`~aiodisklavier.const.DEFAULT_EXCLUDES`, keeps macOS AppleDouble stubs
+            :data:`~aiodisklavier.DEFAULT_EXCLUDES`, keeps macOS AppleDouble stubs
             off the share -- the firmware indexes those as songs and silently resets the
             piano's selection when one is loaded.
         :param include: Further filter, called with each path relative to ``local_dir``.
@@ -1146,7 +1146,11 @@ class DisklavierShare:
             nonlocal step
             step += 1
             if progress is not None:
-                progress(SyncProgress(action, path, size, step, total))
+                progress(
+                    SyncProgress(
+                        action=action, path=path, size=size, index=step, total=total
+                    )
+                )
 
         directories: list[str] = []
         uploaded: list[str] = []
@@ -1179,7 +1183,7 @@ class DisklavierShare:
                 if not continue_on_error:
                     raise
                 _LOGGER.warning("Could not upload %s: %s", destination, err)
-                failed.append(SyncFailure(destination, str(err)))
+                failed.append(SyncFailure(path=destination, error=str(err)))
                 # Still a step. Without this the progress stream stops short of its total,
                 # so a bar driven by it sticks below 100% for the rest of the run.
                 report(SyncAction.FAIL, destination, local.size)

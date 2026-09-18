@@ -5,7 +5,9 @@ Values here mirror the firmware exactly. See ``docs/enspire-api.md`` for provena
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Final
 
 # Open API. The piano serves this two ways: a version-namespaced path,
@@ -63,8 +65,60 @@ NOTIFY_POLL_INTERVAL: Final = 0.5
 #: would see the pre-play state and return immediately.
 NOTIFY_SETTLE: Final = 1.0
 
+# Timing for :meth:`aiodisklavier.Disklavier.async_restore_playback`. The sequencer takes
+# about two seconds to load a song and drops whatever it is sent meanwhile -- a seek or a
+# ``play`` issued straight after ``load_song`` answers HTTP 200 and is lost. Measured on
+# hardware: ``load`` first showed in ``current_info`` 0.7-1.1 s after the command and
+# cleared 1.3-2.0 s after it, for a plain MIDI file and an MP3-backed one alike.
+#: How long to leave the sequencer after a ``stop`` before sending it a ``load_song``.
+#:
+#: A precaution, and labelled as one: what it guards against has not been pinned down. The
+#: sequencer daemon on the reference piano can wedge -- it goes on accepting a selection and
+#: never finishes loading it, and only a reboot clears that (see CONTRIBUTING.md). It
+#: wedged twice in one session of hardware testing, both times during sequences that sent
+#: ``stop`` and ``load_song`` a few tens of milliseconds apart, the second time with nothing
+#: else going on; the same two commands sent a second apart, many times that day, never
+#: did it. Two incidents are not proof, but a second is cheap.
+SEQUENCER_SETTLE: Final = 1.0
+#: How long to leave a freshly cued song before asking whether it has loaded. State lags a
+#: command, so a poll any sooner sees the *previous* state, which also reads as not loading.
+LOAD_SETTLE: Final = 1.5
+#: How long to wait for ``load`` to clear before carrying on regardless.
+LOAD_TIMEOUT: Final = 6.0
+#: How often to check whether it has.
+LOAD_POLL_INTERVAL: Final = 0.25
+#: A seek or ``play`` sent to a cued song is checked against what the piano then reports,
+#: and sent again if it did not take -- once. Deliberately no more than that: the sequencer
+#: daemon is fragile (see CONTRIBUTING.md), a command it has ignored twice is not going to
+#: be obeyed a third time, and repeating into a daemon in trouble is how to make it worse.
+RESTORE_ATTEMPTS: Final = 2
+#: How long after sending to look. Long enough for the state files to catch up.
+RESTORE_CHECK_DELAY: Final = 0.75
+#: A seek counts as kept within this many milliseconds. Position resolution is about a
+#: second, so an exact comparison would call a good seek a failed one.
+SEEK_TOLERANCE_MS: Final = 1500
+
+# Defaults for :meth:`aiodisklavier.Disklavier.async_play_radio`.
+#: How long to wait for a channel to finish connecting before returning regardless. The
+#: piano took four to seven seconds from the request to the first title on hardware.
+RADIO_CONNECT_TIMEOUT: Final = 20.0
+#: How often to check whether it has.
+RADIO_CONNECT_POLL_INTERVAL: Final = 0.5
+
+# Defaults for :meth:`aiodisklavier.Disklavier.async_stop_radio`.
+#: How long to wait for the piano to finish leaving radio before carrying on regardless.
+#: It took a little over a second on hardware; this is headroom, not an expectation.
+RADIO_EXIT_TIMEOUT: Final = 5.0
+#: How often to check whether it has.
+RADIO_EXIT_POLL_INTERVAL: Final = 0.25
+
 #: UPnP device type advertised over SSDP, used for discovery.
 UPNP_DEVICE_TYPE: Final = "urn:schemas-upnp-org:device:Disklavier:1"
+
+#: Where to send a report. Named in the warning logged for a value this library does not
+#: recognise, and by ``python -m aiodisklavier``, because the most useful reports are the
+#: ones from pianos this library has never met.
+ISSUES_URL: Final = "https://github.com/reubenbijl/aiodisklavier/issues"
 
 # SMB. The piano exports two shares from an embedded Samba 3.0.37, which predates SMB2
 # entirely -- it speaks NT1 and nothing newer. See ``docs/enspire-api.md`` for the
@@ -164,17 +218,35 @@ class PlaybackStatus(StrEnum):
 
     There is deliberately no ``STOP``. The ``stop`` command yields ``PAUSE`` with a position
     of zero -- see :meth:`aiodisklavier.Disklavier.async_stop`.
+
+    ``LOAD`` is transitional: the sequencer reports it for a second or two while it loads a
+    song, including on the way out of radio. ``RADIO`` stands for the whole time a
+    DisklavierRadio channel is active, during which the rest of ``current_info`` goes
+    blank -- no title, no position, no length -- and the programme is only to be found in
+    :class:`~aiodisklavier.MasterState`.
+
+    The sequencer has more states than these (recording, fast-forward, synchronised
+    playback), and whether the open API reports any of them has not been observed. A value
+    not listed here parses to ``None`` rather than to a guess.
     """
 
     PLAY = "play"
     PAUSE = "pause"
+    LOAD = "load"
+    RADIO = "radio"
 
 
 class QuietMode(StrEnum):
-    """Whether the hammers physically strike the strings."""
+    """Whether the hammers physically strike the strings.
+
+    ``HEADPHONE`` is reported, never requested: it is what the piano says while headphones
+    are plugged in, and asking for it answers HTTP 400. Only ``ACOUSTIC`` and ``QUIET`` can
+    be set.
+    """
 
     ACOUSTIC = "acoustic"
     QUIET = "quiet"
+    HEADPHONE = "headphone"
 
 
 class SongGroup(StrEnum):
@@ -254,7 +326,7 @@ _AUDIO_FORMATS: Final[frozenset[SongFormat]] = frozenset(
 
 
 class SearchKind(StrEnum):
-    """What a :class:`aiodisklavier.models.SearchResult` points at."""
+    """What a :class:`aiodisklavier.SearchResult` points at."""
 
     SONG = "song"
     PLAYLIST = "playlist"
@@ -263,20 +335,22 @@ class SearchKind(StrEnum):
 
 #: ``master.json`` reports the current library as a bare one-letter prefix, while the open API
 #: takes the long-form group name. This maps back, so a snapshot taken from the internal
-#: endpoint can be restored through the open API.
-PREFIX_TO_SONG_GROUP: Final[dict[str, SongGroup]] = {
-    "d": SongGroup.BUILT_IN_SONGS,
-    "l": SongGroup.BUILT_IN_PLAYLIST,
-    # "s" is inferred, not observed: the my_songs library was empty on the reference
-    # unit, so its prefix never appeared in master.json. If my_songs actually uses a
-    # different prefix, that prefix is unrecognised and restore is skipped; if "s"
-    # turns out to belong to some other library, restore would reselect into my_songs
-    # -- drop this entry if that is ever observed.
-    "s": SongGroup.MY_SONGS,
-    "r": SongGroup.MY_RECORDINGS,
-    "f": SongGroup.PC_SHARING_FOLDER,
-    "y": SongGroup.DOWNLOADED_SONGS,
-}
+#: endpoint can be restored through the open API. Read-only: it describes the firmware, and
+#: a caller that needs a different table should build its own.
+PREFIX_TO_SONG_GROUP: Final[Mapping[str, SongGroup]] = MappingProxyType(
+    {
+        "d": SongGroup.BUILT_IN_SONGS,
+        "l": SongGroup.BUILT_IN_PLAYLIST,
+        # Established from the song database rather than from a loaded song, because My
+        # Songs was empty on the reference unit: its one album is id 4 in
+        # ``get_album_list&group=my_songs`` and is keyed ``s4`` in ``song.json``, with every
+        # other prefix accounted for by another library. See ``docs/enspire-api.md`` §4.
+        "s": SongGroup.MY_SONGS,
+        "r": SongGroup.MY_RECORDINGS,
+        "f": SongGroup.PC_SHARING_FOLDER,
+        "y": SongGroup.DOWNLOADED_SONGS,
+    }
+)
 
 
 class RepeatMode(StrEnum):

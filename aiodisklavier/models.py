@@ -2,14 +2,28 @@
 
 The firmware sends every scalar as a JSON string, including numbers. These models do the
 conversion once so callers never have to think about it.
+
+Every model is keyword-only. The firmware's payloads are wider than what is modelled here,
+and a field for something newly understood has to be addable without reordering anyone's
+arguments -- so new fields arrive with defaults, and code that builds these models, in a
+test fixture say, keeps working across releases.
+
+**What is not recognised is ``None``, never a guess.** A value outside an enumeration
+parses to ``None`` and is logged once, rather than being mapped onto the nearest plausible
+member. This library was written against one piano, so the first value it has never seen
+will come from somebody else's -- and reading that as "on", or "paused", would be a
+confident answer to a question it could not actually answer.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import Any
+from enum import StrEnum
+from typing import Any, Final, TypeVar
 
 from .const import (
+    ISSUES_URL,
     PREFIX_TO_SONG_GROUP,
     PlaybackStatus,
     PlaylistGroup,
@@ -20,6 +34,52 @@ from .const import (
     SongFormat,
     SongGroup,
 )
+
+_LOGGER = logging.getLogger(__name__)
+
+_E = TypeVar("_E", bound=StrEnum)
+
+#: Unrecognised values already reported, as ``(field, value)``. State arrives on every poll,
+#: so without this a piano sitting in a state this library has no name for would log the
+#: same line every few seconds for as long as it stayed there.
+_reported_unknowns: set[tuple[str, str]] = set()
+
+#: Stop reporting after this many distinct values. The values are device-supplied, and a
+#: broken or hostile device must not be able to grow the set, or the log, without limit.
+_MAX_REPORTED_UNKNOWNS: Final = 32
+
+#: How much of an unrecognised value to keep and to log.
+_UNKNOWN_VALUE_CHARS: Final = 80
+
+
+def _report_unknown(name: str, value: Any) -> None:
+    """Log a value this library has no name for, once per distinct value."""
+    key = (name, str(value)[:_UNKNOWN_VALUE_CHARS])
+    if key in _reported_unknowns or len(_reported_unknowns) >= _MAX_REPORTED_UNKNOWNS:
+        return
+    _reported_unknowns.add(key)
+    _LOGGER.warning(
+        "The Disklavier reported %s=%r, which aiodisklavier does not recognise; "
+        "treating it as unknown. Please report it at %s",
+        name,
+        key[1],
+        ISSUES_URL,
+    )
+
+
+def _enum_or_none(enum: type[_E], value: Any, name: str) -> _E | None:
+    """Read an enumerated value: ``None`` when absent, and when not recognised.
+
+    Absent -- a missing key or the firmware's ``""`` -- is unremarkable and silent. A
+    value that is present and unknown is news, and is reported.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return enum(value)
+    except ValueError:
+        _report_unknown(name, value)
+        return None
 
 
 def _dict_or_empty(value: Any) -> dict[str, Any]:
@@ -57,7 +117,10 @@ def _repeat_mode(value: Any) -> RepeatMode | None:
     except ValueError:
         pass
     candidates = [mode for mode in RepeatMode if mode.value.startswith(value)]
-    return candidates[0] if len(candidates) == 1 else None
+    if len(candidates) == 1:
+        return candidates[0]
+    _report_unknown("repeat", value)
+    return None
 
 
 def _str_or_none(value: Any) -> str | None:
@@ -71,7 +134,7 @@ def _str_or_none(value: Any) -> str | None:
     return text or None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class StaticInfo:
     """Device identity, from ``/api/static_info``.
 
@@ -100,16 +163,21 @@ class StaticInfo:
         )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class CurrentInfo:
     """Live state, from ``/api/current_info``.
 
-    One poll of this is enough to drive a media player entity.
+    One poll of this is enough to drive a media player entity -- except while a radio
+    channel is playing, when the title, position and length here all go blank and the
+    programme is in :class:`MasterState` instead. :attr:`is_radio` says when.
     """
 
-    power_status: PowerStatus
-    quiet_status: QuietMode
-    playback_status: PlaybackStatus
+    #: ``None`` when the piano reported a value this library does not recognise, or none at
+    #: all. The same goes for the two statuses below; a model without a silent system may
+    #: well have nothing to say for ``quiet_status``.
+    power_status: PowerStatus | None
+    quiet_status: QuietMode | None
+    playback_status: PlaybackStatus | None
     position_ms: int | None
     volume: int | None
     song_title: str | None
@@ -121,28 +189,20 @@ class CurrentInfo:
     def from_json(cls, data: dict[str, Any]) -> CurrentInfo:
         """Build from a decoded ``/api/current_info`` payload.
 
-        Unrecognised enum values fall back to a sensible default rather than raising, so a
-        future firmware adding a state cannot break an existing integration.
+        An unrecognised status parses to ``None`` rather than raising, so a firmware that
+        adds a state cannot break an existing integration -- and rather than falling back to
+        a plausible member, so it cannot quietly mislead one either.
         """
-        try:
-            power = PowerStatus(data.get("power_status", ""))
-        except ValueError:
-            power = PowerStatus.ON
-
-        try:
-            quiet = QuietMode(data.get("quiet_status", ""))
-        except ValueError:
-            quiet = QuietMode.ACOUSTIC
-
-        try:
-            playback = PlaybackStatus(data.get("playback_status", ""))
-        except ValueError:
-            playback = PlaybackStatus.PAUSE
-
         return cls(
-            power_status=power,
-            quiet_status=quiet,
-            playback_status=playback,
+            power_status=_enum_or_none(
+                PowerStatus, data.get("power_status"), "power_status"
+            ),
+            quiet_status=_enum_or_none(
+                QuietMode, data.get("quiet_status"), "quiet_status"
+            ),
+            playback_status=_enum_or_none(
+                PlaybackStatus, data.get("playback_status"), "playback_status"
+            ),
             position_ms=_int_or_none(data.get("playback_position")),
             volume=_int_or_none(data.get("volume_main")),
             song_title=_str_or_none(data.get("song_title")),
@@ -153,17 +213,33 @@ class CurrentInfo:
 
     @property
     def is_playing(self) -> bool:
-        """Whether the piano is actively playing."""
-        return self.playback_status is PlaybackStatus.PLAY
+        """Whether the piano is making music: playing a song, or playing the radio.
+
+        ``False`` for a status this library does not recognise. Claiming the piano is
+        sounding when it may not be is the worse direction to be wrong in.
+        """
+        return self.playback_status in (PlaybackStatus.PLAY, PlaybackStatus.RADIO)
+
+    @property
+    def is_radio(self) -> bool:
+        """Whether a DisklavierRadio channel is active.
+
+        Worth checking before sending a transport command. While radio is on the piano
+        answers ``play``, ``pause``, ``stop``, ``next_song`` and every ``load_*`` and
+        ``play_*`` with HTTP 200 and ignores them; only
+        :meth:`~aiodisklavier.Disklavier.async_stop_radio` ends it.
+        """
+        return self.playback_status is PlaybackStatus.RADIO
 
     @property
     def is_stopped(self) -> bool:
         """Whether the piano looks stopped rather than paused mid-song.
 
         The firmware has no distinct stop state: ``stop`` leaves ``playback_status`` at
-        ``pause`` and rewinds to zero. Position is the only signal available.
+        ``pause`` and rewinds to zero. Position is the only signal available. A piano that
+        is loading, or in a state this library does not recognise, is not called stopped.
         """
-        return not self.is_playing and not self.position_ms
+        return self.playback_status is PlaybackStatus.PAUSE and not self.position_ms
 
     @property
     def position_seconds(self) -> float | None:
@@ -176,7 +252,7 @@ class CurrentInfo:
         return None if self.duration_ms is None else self.duration_ms / 1000
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class MasterState:
     """The subset of ``/ctrl/master.json`` that the open API does not expose.
 
@@ -201,6 +277,15 @@ class MasterState:
     #: leaves it alone for transport and volume changes, so a new value means any
     #: listing read before it may be out of date.
     library_updated: int | None = None
+    #: The DisklavierRadio channel that is playing, by title, and the song it is on. This
+    #: is the only place the programme is reported: ``current_info`` goes blank for as long
+    #: as radio is active. Both are ``None`` when radio is off, and for the few seconds a
+    #: channel spends connecting.
+    #:
+    #: Do not read :attr:`song_prefix` and :attr:`song_id` as what is sounding while these
+    #: are set -- during radio they still name the library song that was loaded before it.
+    radio_channel: str | None = None
+    radio_title: str | None = None
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> MasterState:
@@ -209,6 +294,7 @@ class MasterState:
         sbc = _dict_or_empty(data.get("sbc"))
         seq = _dict_or_empty(data.get("seq"))
         apictrl = _dict_or_empty(data.get("apictrl"))
+        radio = _dict_or_empty(data.get("radio"))
 
         repeat = _repeat_mode(data.get("repeat"))
 
@@ -232,17 +318,19 @@ class MasterState:
             song_prefix=_str_or_none(seq.get("song_pfix")),
             song_id=_int_or_none(seq.get("song_id")),
             library_updated=_int_or_none(apictrl.get("update_window")),
+            radio_channel=_str_or_none(radio.get("radio_channel")),
+            radio_title=_str_or_none(radio.get("radio_title")),
         )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PlaybackSnapshot:
     """A restorable playback position, captured from ``/ctrl/master.json``.
 
     Enough to put the piano back where it was after an interruption: which song was loaded,
-    how far in, and whether it was playing. Reselecting a song needs both the library prefix
-    and the song id, and ``/api/current_info`` exposes neither -- which is why this reads the
-    internal ``master.json`` instead.
+    how far in, and whether it was playing -- or which radio channel was on. Reselecting a
+    song needs both the library prefix and the song id, and ``/api/current_info`` exposes
+    neither, which is why this reads the internal ``master.json`` instead.
 
     See :meth:`aiodisklavier.Disklavier.async_snapshot_playback` and
     :meth:`aiodisklavier.Disklavier.async_restore_playback`.
@@ -252,18 +340,37 @@ class PlaybackSnapshot:
     song_id: int | None
     position_ms: int
     was_playing: bool
+    #: Whether DisklavierRadio was active. It has to be ended before anything else will
+    #: play: the piano ignores every ``load_*`` and ``play_*`` command while it is on.
+    radio_active: bool = False
+    #: The channel that was playing, by title -- the state file names it no other way.
+    #: ``None`` when radio was off, and when it was caught still connecting.
+    radio_channel: str | None = None
 
     @classmethod
     def from_master_json(cls, data: dict[str, Any]) -> PlaybackSnapshot:
         """Build from a decoded ``/ctrl/master.json`` payload."""
         seq = _dict_or_empty(data.get("seq"))
+        radio = _dict_or_empty(data.get("radio"))
+        # The radio block's status is "" with radio off, and "channel" or "play" with it on.
+        radio_active = _str_or_none(radio.get("status")) is not None
         return cls(
             song_prefix=_str_or_none(seq.get("song_pfix")),
             song_id=_int_or_none(seq.get("song_id")),
-            position_ms=_int_or_none(seq.get("time")) or 0,
+            # During radio the sequencer block keeps naming the library song loaded
+            # beforehand, while its clock and status follow the *radio's* current song.
+            # Taken at face value that pairs one song's id with another's position, and
+            # restoring it would start the old song playing from somewhere arbitrary. The
+            # song itself is worth keeping -- it is what the piano returns to when radio
+            # ends -- but entering radio had already rewound it, so: from the top, quiet.
+            position_ms=0 if radio_active else _int_or_none(seq.get("time")) or 0,
             # The sequencer reports 'play' only while actively playing; 'pause', 'stop' and
             # 'load' all mean quiet.
-            was_playing=seq.get("status") == "play",
+            was_playing=not radio_active and seq.get("status") == "play",
+            radio_active=radio_active,
+            radio_channel=(
+                _str_or_none(radio.get("radio_channel")) if radio_active else None
+            ),
         )
 
     @property
@@ -272,13 +379,13 @@ class PlaybackSnapshot:
         return bool(self.song_prefix) and self.song_id is not None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class LibrarySong:
     """One song as the piano's own database describes it, from ``/ctrl/song.json``.
 
     Richer than the open API's :class:`Song` rows: the database is the controller UI's
     backing store, and it carries what the listings omit -- most usefully the media
-    :class:`~aiodisklavier.const.SongFormat`, which is how the controller knows to show
+    :class:`~aiodisklavier.SongFormat`, which is how the controller knows to show
     a format badge and to lock the tempo control for audio-driven songs.
     """
 
@@ -301,16 +408,11 @@ class LibrarySong:
         if prefix is None or song_id is None:
             return None
 
-        try:
-            song_format = SongFormat(str(row.get("format")))
-        except ValueError:
-            song_format = None
-
         return cls(
             prefix=prefix,
             song_id=song_id,
             title=str(row.get("song_title", "")),
-            format=song_format,
+            format=_enum_or_none(SongFormat, row.get("format"), "format"),
             group=PREFIX_TO_SONG_GROUP.get(prefix),
             album_id=_int_or_none(row.get("album_id")),
             length_ms=_int_or_none(row.get("length")),
@@ -323,19 +425,24 @@ class LibrarySong:
     def has_audio(self) -> bool | None:
         """Whether playing this song uses the speaker path, or ``None`` if unknown.
 
-        See :attr:`aiodisklavier.const.SongFormat.has_audio` for the rule.
+        See :attr:`aiodisklavier.SongFormat.has_audio` for the rule.
         """
         return None if self.format is None else self.format.has_audio
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class LibraryAlbum:
     """One album as the piano's own database describes it, from ``/ctrl/song.json``.
 
     The same albums :meth:`~aiodisklavier.Disklavier.async_get_albums` lists, under the
-    same ids and titles -- a PC Sharing Folder album is titled by its folder's path on
-    the share -- but every library's albums arrive in the one database fetch, which the
-    piano serves several times faster than it builds an album listing.
+    same ids, but every library's albums arrive in the one database fetch, which the piano
+    serves several times faster than it builds an album listing.
+
+    Titles agree where they are the user's own: a PC Sharing Folder album is titled by its
+    folder's path on the share in both. The folders the firmware provides are named
+    differently by the two sources -- a library's root is ``(Root)`` here and ``""`` in the
+    listing, and My Recordings' pair are ``Temporary Folder`` and ``Keep`` here against
+    ``Recorded Songs`` and ``Kept Songs`` there -- so join on the id, not the title.
     """
 
     prefix: str
@@ -363,7 +470,7 @@ class LibraryAlbum:
         )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SongDatabase:
     """The piano's own song database, from ``/ctrl/song.json``.
 
@@ -402,7 +509,7 @@ class SongDatabase:
         return self.songs.get(f"{prefix}{song_id}")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SearchResult:
     """One search hit, carrying whichever reference its kind needs to play it.
 
@@ -422,7 +529,7 @@ class SearchResult:
     channel: RadioChannel | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Song:
     """A song in one of the libraries."""
 
@@ -430,7 +537,7 @@ class Song:
     title: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Album:
     """An album in one of the libraries."""
 
@@ -438,7 +545,7 @@ class Album:
     title: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Playlist:
     """A playlist."""
 
@@ -446,7 +553,7 @@ class Playlist:
     title: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RadioChannel:
     """A DisklavierRadio channel."""
 

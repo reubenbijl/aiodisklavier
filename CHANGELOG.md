@@ -6,6 +6,152 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+The last incompatible changes before 1.0, made now because they only get more expensive, and
+the fixes from a morning spent finding out what the piano really does with a radio, a
+notification and a restore. Several of these change behaviour a caller may be relying on —
+**read "Changed" before upgrading.** Everything marked *found on hardware* is written up,
+with its evidence, in `docs/enspire-api.md`.
+
+### Changed
+
+- **Every model is keyword-only.** `Album(1, "Pop")` is now a `TypeError`; write
+  `Album(album_id=1, title="Pop")`. Twice already a field had to be appended with a default
+  purely so positional callers kept working, and after 1.0 every new firmware field would
+  have carried that constraint for good. New fields now arrive with defaults, so code that
+  builds a model — a test fixture, usually — keeps working across releases. Applies to
+  everything in `aiodisklavier.__all__` that is a dataclass, the share's `ShareEntry` and
+  `Sync*` results included.
+- **A status this library does not recognise is `None`, not a guess.**
+  `CurrentInfo.power_status`, `quiet_status` and `playback_status` are now `... | None`, where
+  an unknown value used to become `ON`, `ACOUSTIC` and `PAUSE`. That went wrong on the
+  reference piano itself — see the two new values below, both of which were being read as
+  their fallbacks — and the next unknown value will come from a piano nobody here has met. An
+  unrecognised value is logged once, as a warning that names it and asks for a report; an
+  absent one is silent. **Callers that read `.value` off a status, or `match` on one without
+  a default arm, need a `None` case.** `mypy` will find them.
+- **`CurrentInfo.is_playing` is true during radio**, since the piano is making music, and
+  `is_stopped` is true only for `PAUSE` at position zero — no longer for a piano that is
+  loading, or in a state this library cannot name.
+- **An HTTP 4xx other than 400 raises `DisklavierResponseError`**, carrying the status as
+  `http_status`. It used to fall through `raise_for_status` into `DisklavierConnectionError`,
+  which is the error a poller treats as "unreachable, try again" — so a piano that simply
+  does not serve an endpoint, the likeliest way another model or firmware will differ, would
+  have been retried for ever and reported as offline. 5xx is still a connection error, now
+  deliberately and with the status in the message.
+- **`async_search` leaves radio out unless asked**: pass `include_radio=True`. See the first
+  entry under "Fixed" for why the default had to change.
+- **`async_get_radio_channels` caches.** The first call reads the list and later ones are
+  served from the client; pass `refresh=True` to read it again. A real read also now returns
+  only once the sequencer has settled from the reset it causes.
+- **`async_play_radio` and `async_stop_radio` wait**, by default, until the channel has
+  connected and until the piano will take a command again — a few seconds and about one
+  second. Pass `wait=False` for the old fire-and-forget. Both now read the piano's reply, so
+  a declined request raises instead of passing silently.
+- **`async_restore_playback` takes two to four seconds longer**, because it now does what it
+  says. See "Fixed".
+- `PREFIX_TO_SONG_GROUP` is a read-only mapping.
+
+### Added
+
+- **`PlaybackStatus.LOAD` and `PlaybackStatus.RADIO`, and `QuietMode.HEADPHONE`** — three
+  values the piano reports that this library had no names for. `RADIO` stands for as long as
+  a DisklavierRadio channel is active; `LOAD` for a second or two while the sequencer loads a
+  song; `HEADPHONE` for as long as headphones are plugged in. `HEADPHONE` cannot be requested
+  — the piano answers 400 — so `async_set_quiet_mode` refuses it locally, as `async_set_power`
+  refuses `WAKEUP`. *Found on hardware.*
+- **`CurrentInfo.is_radio`**, and **`MasterState.radio_channel` / `radio_title`**: the
+  programme, which is reported nowhere else — `current_info` goes blank during radio.
+- **`DisklavierEnvelopeError`**, a subclass of `DisklavierResponseError`, for a command the
+  piano understood and declined — `"no subscription"` from `play_radio`, say. It separates the
+  piano's considered "no" from garbage on the wire, which the parent class used to mean as
+  well. Code that catches `DisklavierResponseError` and reads `command` / `error_info` off it
+  is unaffected.
+- **`python -m aiodisklavier <host>`** describes a piano for a bug report: which fields it
+  sends, which values its status fields take, and anything this library does not recognise.
+  Read-only and silent — it never asks for the radio channel list — and it prints shapes
+  rather than contents, because the piano keeps the account's email address and a passcode in
+  the same file as its playback state. Made to be pasted straight into the new **piano
+  report** issue template.
+- **A hardware test suite**, `tests/hardware/`, that runs the library against a real piano:
+  `DISKLAVIER_HOST=<ip> pytest -m hardware`. Read-only by default, with opt-in levels for
+  tests that change settings and for tests that drive the sequencer. Skipped entirely without
+  the variable, so CI and the coverage gate are unaffected. See `CONTRIBUTING.md`.
+- **The public surface is written down.** `aiodisklavier.__all__` is the API; submodule paths
+  and underscore names are not. Newly exported to make that true for names the docstrings
+  already pointed at: `SMBBackend` — the `connection_factory` seam had no importable type —
+  and `API_VERSION`, `DEFAULT_TIMEOUT`, `SMB_TIMEOUT`, `NOTIFY_WAIT_TIMEOUT`,
+  `MAX_RESPONSE_BYTES`, `MAX_SONG_DB_BYTES` and `PREFIX_TO_SONG_GROUP`. The README gains a
+  **Stability** section saying what 1.0 will and will not promise.
+- `PlaybackSnapshot.radio_active` / `radio_channel`, and `DisklavierResponseError.http_status`.
+- `SECURITY.md`, issue templates, a CI job that tests against the lowest dependency versions
+  the package claims to support, and a macOS leg.
+
+### Fixed
+
+- **Searching no longer stops the music.** `get_radio_channel_list` looks like a read and is
+  not: it stops the sequencer, so a song that was playing falls silent and one that was paused
+  is rewound to the start. `async_search` read it on every call — so every search from a media
+  browser stopped whatever the piano was playing. *Found on hardware.*
+- **A notification sent while the radio is on now sounds.** The piano answers every `load_*`
+  and `play_*` with HTTP 200 during radio and ignores them, so `async_notify` was accepted,
+  played nothing, and "restored" a snapshot that paired the previously loaded song's id with
+  the *radio's* clock. It now ends the radio first — waiting out the second after
+  `stop_radio`'s reply during which the piano is still deaf — and puts the channel back on
+  afterwards. A snapshot taken during radio records the channel and no longer trusts the
+  sequencer block. *Found on hardware.*
+- **`async_restore_playback` restores the position, and resumes a song that was playing.** On
+  the reference piano it was doing neither. `load_song` answers at once and the sequencer
+  then loads for about two seconds, dropping what it is sent meanwhile; the restore sent its
+  seek and its `play` straight after, so the piano came back on the right song, at the start,
+  stopped — a plain MIDI file and an MP3-backed song alike. The tests checked that the
+  requests went out. The restore now
+  waits for the load, reads the position back, and sends a dropped seek or `play` once more —
+  once, because this daemon does not reward persistence. *Found on hardware*, and the reason
+  the hardware suite exists.
+- **`async_notify` no longer ends its wait at the first `load`.** On the way out of radio the
+  piano reports `load` for longer than the settle, which read as "finished" and had the
+  restore stop the notification before its first note.
+- **`async_play_radio` reports a channel the account cannot play.** The piano answers
+  `{"status":"error","error_info":"no subscription"}` inside HTTP 200, and the reply was not
+  being read.
+- **`async_search` no longer hides a broken channel list.** It caught the broad response
+  error around the radio read, so a truncated reply looked like a region without radio.
+- The library paces its own compound operations: a second between `stop` and `load_song`, no
+  second `stop` for a piano that is already stopped, nothing sent to a song that is loading.
+  A precaution against the sequencer wedging, whose cause is not established — see
+  `docs/enspire-api.md` §7.14.
+- `pytest-asyncio` is floored at 0.24, the first release to know the config option the suite
+  sets; 0.23 refused to start. Found by the new lowest-dependencies job.
+- `LibraryAlbum`'s documentation claimed the database and the album listing agree on titles.
+  They agree on ids; the firmware's own folders are titled differently by each.
+
+### Notes on firmware behaviour
+
+- **The `my_songs` prefix is `s`**, now established rather than inferred: the library's one
+  album is id 4 in `get_album_list&group=my_songs` and is keyed `s4` in the song database,
+  with every other prefix accounted for.
+- **Radio is a mode that takes the piano over**, and a paused position does not survive a
+  visit to it. `docs/enspire-api.md` §4 has the whole account, replacing the "not
+  established" note it used to carry.
+- **The sequencer daemon can wedge, and only a reboot clears it.** Documented, with the
+  signature, the recovery and what is and is not known about the cause, in
+  `docs/enspire-api.md` §7.14 and `CONTRIBUTING.md`.
+
+### Upgrading
+
+For a typical consumer — Home Assistant's integration is the model case:
+
+1. Build models by keyword, in tests especially.
+2. Handle `None` from `power_status`, `quiet_status` and `playback_status`, and decide what
+   `PlaybackStatus.RADIO`, `PlaybackStatus.LOAD` and `QuietMode.HEADPHONE` mean to you. For a
+   media player: `RADIO` is playing, with its title in `MasterState.radio_title`.
+3. If you searched radio channels, pass `include_radio=True` — and read the channel list once
+   at start-up, when nothing is playing, so that it is never a search that interrupts.
+4. If you distinguish "unreachable" from "unsupported", a 404 has moved from the first to the
+   second.
+5. Check `CurrentInfo.is_radio` before sending a transport command, and stop the radio first
+   if the user has asked for something else to play.
+
 ## [0.2.3] — 2026-09-19
 
 ### Fixed

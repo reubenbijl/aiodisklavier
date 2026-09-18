@@ -45,7 +45,13 @@ import asyncio
 
 import aiohttp
 
-from aiodisklavier import Disklavier, DisklavierResponseError, Song, SongGroup
+from aiodisklavier import (
+    CurrentInfo,
+    Disklavier,
+    DisklavierResponseError,
+    Song,
+    SongGroup,
+)
 
 
 async def _find_by_title(piano: Disklavier, title: str, group: SongGroup) -> Song:
@@ -64,6 +70,17 @@ async def _find_by_title(piano: Disklavier, title: str, group: SongGroup) -> Son
     )
 
 
+def _describe(info: CurrentInfo) -> str:
+    """Summarise what the piano is doing, for a before-and-after line.
+
+    ``playback_status`` is ``None`` when the piano reports a state this library has no
+    name for, so it is not assumed to be there. During radio the song fields are blank:
+    the programme is in ``async_get_master_state``, and "radio" is all this can say.
+    """
+    status = info.playback_status.value if info.playback_status else "unknown"
+    return f"{info.song_title!r} ({status})"
+
+
 async def ring_doorbell(
     host: str, title: str, group: SongGroup, volume: int | None
 ) -> None:
@@ -76,7 +93,7 @@ async def ring_doorbell(
         song = await _find_by_title(piano, title, group)
 
         before = await piano.async_get_current_info()
-        print(f"before: {before.song_title!r} ({before.playback_status.value})")
+        print(f"before: {_describe(before)}")
         print(f"ringing: {song.title!r} (id {song.song_id})...")
 
         await piano.async_notify(song_id=song.song_id, group=group, volume=volume)
@@ -84,7 +101,7 @@ async def ring_doorbell(
         # current_info trails a reselect by a beat, so give it a moment before reading back.
         await asyncio.sleep(1.5)
         after = await piano.async_get_current_info()
-        print(f"after:  {after.song_title!r} ({after.playback_status.value})")
+        print(f"after:  {_describe(after)}")
 
 
 async def test_chord(host: str) -> None:

@@ -29,6 +29,8 @@ from smb.base import NotConnectedError, SharedDevice, SharedFile
 from smb.smb_structs import OperationFailure, SMBMessage
 
 from aiodisklavier import Disklavier
+from aiodisklavier import client as client_module
+from aiodisklavier import models as models_module
 from aiodisklavier.const import (
     PATH_API_BASE,
     PATH_CURRENT_INFO,
@@ -176,9 +178,66 @@ SONG_DB_PAYLOAD = {
 }
 
 
+# master.json as it reads while a radio channel plays. Captured from hardware: the radio
+# block carries the programme, while the sequencer block runs on the radio's clock --
+# status 'play', time advancing, endtime the radio song's length -- yet still names the
+# library song that was loaded beforehand.
+RADIO_MASTER_PAYLOAD = {
+    **MASTER_PAYLOAD,
+    "seq": {
+        "status": "play",
+        "time": 22000,
+        "endtime": 186190,
+        "tempo": 0,
+        "song_pfix": "y",
+        "song_id": "24",
+    },
+    "radio": {
+        "info": "connected",
+        "status": "play",
+        "radio_channel": "Complimentary Channel Sampler",
+        "radio_title": "Lullaby of Birdland",
+    },
+}
+
+# current_info while a radio channel plays: everything about the song goes blank.
+RADIO_CURRENT_INFO_PAYLOAD = {
+    **CURRENT_INFO_PAYLOAD,
+    "playback_status": "radio",
+    "playback_position": "0",
+    "song_title": "",
+    "song_artist": "",
+    "song_folder": "",
+    "song_length": "0",
+}
+
+# The radio commands answer with a bare envelope -- no error_info key -- where every other
+# command answers with an empty body. Byte-for-byte what the piano sends.
+RADIO_OK = '{"status":"ok"}'
+RADIO_CHANNELS = [
+    {"channel_id": 1, "channel_title": "Complimentary Channel Sampler"},
+    {"channel_id": 31, "channel_title": "Chopin"},
+]
+
+
 def dumps(payload: object) -> str:
     """Serialise a payload the way the firmware would."""
     return json.dumps(payload)
+
+
+def radio_channel_list(channels: list[dict[str, object]] | None = None) -> str:
+    """Build a channel listing the way the firmware spells it: no error_info key."""
+    rows = RADIO_CHANNELS if channels is None else channels
+    return dumps({"status": "ok", "channel_list": rows})
+
+
+def _default_command_bodies() -> dict[str, str]:
+    """Bodies for the commands that answer with one even when all is well."""
+    return {
+        "play_radio": RADIO_OK,
+        "stop_radio": RADIO_OK,
+        "get_radio_channel_list": radio_channel_list(),
+    }
 
 
 def ok_envelope(**payload: object) -> str:
@@ -216,9 +275,12 @@ class FakePiano:
     #: Per-command status overrides, so one command can fail while the rest work.
     command_status_for: dict[str, int] = field(default_factory=dict)
     #: Per-command body overrides, so one command can answer differently from the rest.
-    command_body_for: dict[str, str] = field(default_factory=dict)
+    #: Starts with the radio commands' real replies; assign a new dict to drop them.
+    command_body_for: dict[str, str] = field(default_factory=_default_command_bodies)
     #: Extra headers on open API command replies, e.g. a Location for a redirect.
     command_headers: dict[str, str] = field(default_factory=dict)
+    #: Body returned by /api/static_info.
+    static_body: str = field(default_factory=lambda: dumps(STATIC_INFO_PAYLOAD))
     #: Body returned by /api/current_info.
     current_body: str = field(default_factory=lambda: dumps(CURRENT_INFO_PAYLOAD))
     #: Raw bytes for /api/current_info, taking precedence over ``current_body``. Lets a
@@ -234,6 +296,30 @@ class FakePiano:
     delay: float = 0.0
     #: Body returned by /ctrl/song.json. Defaults to a small but complete database.
     song_db_body: str = field(default_factory=lambda: dumps(SONG_DB_PAYLOAD))
+    #: Body returned by /ctrl/master.json.
+    master_body: str = field(default_factory=lambda: dumps(MASTER_PAYLOAD))
+    #: HTTP status for every /ctrl/ endpoint, for a firmware that does not serve one.
+    ctrl_status: int = 200
+    #: Called with each open API command as it arrives, to let a test change the piano's
+    #: state in response -- reporting 'play' once asked to play, say.
+    on_command: Callable[[str], None] | None = None
+    #: Called with the position of each seek, to let a test have the piano report it.
+    on_seek: Callable[[str], None] | None = None
+    #: Called after each master.json request, to let a test change what comes next.
+    on_master: Callable[[], None] | None = None
+    #: Whether ``play_radio`` and ``stop_radio`` move the reported state, as they do on the
+    #: piano. Turn off to imitate a radio that never connects, or never lets go.
+    radio_obeys: bool = True
+
+    def start_radio(self) -> None:
+        """Report a radio channel playing, in both state reads, as the piano does."""
+        self.current_body = dumps(RADIO_CURRENT_INFO_PAYLOAD)
+        self.master_body = dumps(RADIO_MASTER_PAYLOAD)
+
+    def stop_radio(self) -> None:
+        """Report the radio off again."""
+        self.current_body = dumps(CURRENT_INFO_PAYLOAD)
+        self.master_body = dumps(MASTER_PAYLOAD)
 
     async def _record(self, request: web.Request) -> None:
         self.requests.append(
@@ -251,12 +337,20 @@ class FakePiano:
         """The most recent request."""
         return self.requests[-1]
 
+    def last_command(self, name: str) -> Request:
+        """Return the most recent request for one open API command.
+
+        For commands the client follows with state polls of its own, where ``last`` would
+        be a poll rather than the command.
+        """
+        return next(r for r in reversed(self.requests) if r.command == name)
+
     def build_app(self) -> web.Application:
         """Build the aiohttp application."""
 
         async def static_info(request: web.Request) -> web.Response:
             await self._record(request)
-            return web.Response(text=dumps(STATIC_INFO_PAYLOAD))
+            return web.Response(text=self.static_body)
 
         async def current_info(request: web.Request) -> web.StreamResponse:
             await self._record(request)
@@ -278,15 +372,27 @@ class FakePiano:
 
         async def master_json(request: web.Request) -> web.Response:
             await self._record(request)
-            return web.Response(text=dumps(MASTER_PAYLOAD))
+            body = self.master_body
+            if self.on_master is not None:
+                self.on_master()
+            return web.Response(text=body, status=self.ctrl_status)
 
         async def song_db(request: web.Request) -> web.Response:
             await self._record(request)
-            return web.Response(text=self.song_db_body)
+            return web.Response(text=self.song_db_body, status=self.ctrl_status)
 
         async def command(request: web.Request) -> web.Response:
             await self._record(request)
             name = request.path.rpartition("/")[2]
+            if self.on_command is not None:
+                self.on_command(name)
+            status = self.command_status_for.get(name, self.command_status)
+            body = self.command_body_for.get(name, self.command_body)
+            if self.radio_obeys and status == 200 and body == RADIO_OK:
+                if name == "play_radio":
+                    self.start_radio()
+                elif name == "stop_radio":
+                    self.stop_radio()
             return web.Response(
                 text=self.command_body_for.get(name, self.command_body),
                 status=self.command_status_for.get(name, self.command_status),
@@ -295,7 +401,9 @@ class FakePiano:
 
         async def ctrl(request: web.Request) -> web.Response:
             await self._record(request)
-            return web.Response(text="")
+            if self.on_seek is not None and "time" in request.query:
+                self.on_seek(request.query["time"])
+            return web.Response(text="", status=self.ctrl_status)
 
         app = web.Application()
         # Order matters: the specific state paths must be registered before the catch-all
@@ -310,6 +418,37 @@ class FakePiano:
         app.router.add_get("/ctrl/putNoteOn.php", ctrl)
         app.router.add_get("/ctrl/setRefreshDB.php", ctrl)
         return app
+
+
+@pytest.fixture(autouse=True)
+def _no_real_time_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Collapse the client's real-time waits, so the suite runs in a second or two.
+
+    Every one of these is a pause the firmware needs and a fake does not: the settle after
+    a command, the intervals between polls, the delay before a check. A test about timing
+    sets its own values over these.
+    """
+    for name in (
+        "NOTIFY_SETTLE",
+        "NOTIFY_POLL_INTERVAL",
+        "SEQUENCER_SETTLE",
+        "LOAD_SETTLE",
+        "LOAD_POLL_INTERVAL",
+        "RESTORE_CHECK_DELAY",
+        "RADIO_EXIT_POLL_INTERVAL",
+        "RADIO_CONNECT_POLL_INTERVAL",
+    ):
+        monkeypatch.setattr(client_module, name, 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_unknown_reports(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Forget which unrecognised values have been reported, before every test.
+
+    The once-per-value reporting is process-wide state, and it is capped. Without this
+    a test asserting that a warning fires would depend on which tests ran before it.
+    """
+    monkeypatch.setattr(models_module, "_reported_unknowns", set())
 
 
 @pytest.fixture

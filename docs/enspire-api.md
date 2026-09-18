@@ -16,7 +16,7 @@ Every claim is marked with where it came from:
 - **[inferred]** — deduced from observed behaviour, not directly confirmed.
 
 Everything below is reproducible with `curl` and a browser against a stock piano. Where a fact
-could not be established that way it is either omitted or listed in §8 as unknown, rather than
+could not be established that way it is either omitted or listed in §9 as unknown, rather than
 guessed at.
 
 ---
@@ -127,6 +127,20 @@ Everything a media player needs, in one poll.
 Positions and lengths are **milliseconds, as strings**. Every scalar is a string, numbers
 included.
 
+The three status fields take more values than their names suggest: **[live]**
+
+| Field | Values seen | |
+|---|---|---|
+| `power_status` | `on` · `sleep` · `wakeup` | `wakeup` is transitional, about 12 s (§7.2) |
+| `quiet_status` | `acoustic` · `quiet` · `headphone` | `headphone` is reported for as long as headphones are plugged in (`sbc.headphone: connected` in `master.json`). It cannot be requested: `set_quiet_status?headphone` answers 400 |
+| `playback_status` | `play` · `pause` · `load` · `radio` | `load` is transitional, a second or two while the sequencer loads a song. `radio` stands for the whole time a DisklavierRadio channel is active (§4) |
+
+The sequencer behind `playback_status` has a larger vocabulary of its own — the web app's
+JavaScript tests `seq.status` against `stop`, `ffs`, `frs`, `record`, `rec_wait`, `nosong`,
+`sync_play` and more **[app]** — and whether the open API ever reports any of those has not
+been observed (§9). Treat an unlisted value as unknown rather than mapping it onto a
+neighbour.
+
 ---
 
 ## 4. Open API — commands
@@ -177,12 +191,19 @@ reports in `master.json`, which matters for restoring a selection (§6).
 |---|---|---|
 | `built_in_songs` (also accepted as `built_in_song`) | `d` | factory library, 500 songs here |
 | `built_in_playlist` | `l` | |
-| `my_songs` | *unverified* | empty on this unit, so its prefix was never observed |
+| `my_songs` | `s` | established by joining the album list to the database, below |
 | `my_recordings` | `r` | |
 | `pc_sharing_folder` | `f` | the SMB share |
 | `downloaded_songs` | `y` | |
 
 Playlist-specific groups: `demo_playlist` and `playlists`. **[api-test]**
+
+**How `s` was established.** My Songs held no songs on this unit, so `s` was never seen as
+the prefix of a loaded song — but the library still has a root album, and that was enough.
+`get_album_list&group=my_songs` reports exactly one album, id 4. `song.json` holds exactly
+one album row under the prefix `s`, keyed `s4`, with `album_id` 4. Every other prefix in the
+database is accounted for by another library (`d` `f` `r` `y`, and `l` for playlists). So `s`
+is My Songs, by join rather than by observation of `seq.song_pfix` itself. **[live]**
 
 ### Choosing what to play **[api-test]**
 
@@ -234,10 +255,55 @@ Two traps, both confirmed:
 - **An empty library is an error, not an empty list** — HTTP 200 carrying
   `{"status":"error","error_info":"no song","song_list":[]}`. Always check `status`.
 
-### Radio **[api-test]**
+### Radio
 
-`get_radio_channel_list` · `play_radio&channel_id=<int>` · `stop_radio`. The listing works and
-returned 51 channels on this unit. **[live]**
+`get_radio_channel_list` · `play_radio&channel_id=<int>` · `stop_radio`. **[api-test]** All
+three are confirmed **[live]**, on the one channel this account could play — channel 1, the
+complimentary sampler. Unlike every other command, which answers with an empty body, these
+answer with an envelope, and a bare one: `{"status":"ok"}`, with no `error_info` key.
+
+**Radio is a mode, and it takes the piano over.** Everything below is **[live]**.
+
+- **`get_radio_channel_list` is not a read.** It takes about two seconds, returns
+  `{"status":"ok","channel_list":[{"channel_id":1,"channel_title":"…"}, …]}` — 50 channels in
+  September 2026, 51 a month earlier, so ids are positions in a line-up that moves — and **it
+  stops the sequencer.** A song that was playing went to `load` and came back stopped at
+  zero: the music stopped. A song paused at 34 s came back rewound to zero. Both every time.
+  Only a radio channel already playing carried on undisturbed. For a second or so after the
+  reply the piano is reloading its song and drops whatever it is sent. Read the list once, at
+  a quiet moment, and keep it.
+- **`play_radio` answers in 2–4 s and the music follows a few seconds later.** In between,
+  `master.json`'s `msgbox` holds `{"type":"exclusive","msg":"Connecting... "}`, which the
+  piano's own interface shows as a modal with no buttons. From request to the first title
+  was 4–7 s.
+- **A channel outside the subscription answers
+  `{"status":"error","error_info":"no subscription"}`** inside HTTP 200 — **and ends whatever
+  channel was already playing.**
+- **`current_info` goes blank.** `playback_status` reads `radio`; `playback_position` and
+  `song_length` read `0`; title, artist and folder are empty strings. The programme is only
+  in `master.json`, in a `radio` block: `info` (`connected` / `disconnected`), `status` (`""`
+  off, `play` on a channel, and `channel` while the web app sits on its channel list),
+  `radio_channel` — the channel's *title*, not its id — and `radio_title`, the song it is on.
+- **The `seq` block misleads during radio.** Its `status` reads `play`, its `time` advances
+  and its `endtime` is the radio song's length — but `song_pfix` and `song_id` still name the
+  library song that was loaded beforehand. Read naively that is "the old song, playing, 22 s
+  in". It is not.
+- **The transport is ignored.** `play`, `pause`, `stop` and `next_song` all answered 200 and
+  did nothing; so did `load_song` and `play_single_song`. A notification sent over the radio
+  is accepted and never sounds. `set_volume_main` still works, and so, oddly, does
+  `setSeq.php?time=`, which seeks within the song the *channel* is playing.
+- **Only `stop_radio` ends it**, and it answers before it has finished. The reply comes in
+  0.3–0.4 s; the piano then spends about a second in `load`, putting back the song it had
+  before, and **drops commands for that second**. A `play_single_song` sent straight after
+  the reply never sounded; sent once `current_info` had left both `radio` and `load`, it
+  played. With no radio on, `stop_radio` still answers `ok` and disturbs nothing.
+- **A paused position does not survive a visit to the radio.** A song paused at 34 s came
+  back stopped at zero.
+
+The piano's own interface treats all this as an exclusive mode too: it asks "would you like
+to quit DisklavierRadio?" and sends `stop_radio` before it opens anything else. It drives the
+radio through `setIdcfunc.php` (`function=play_radio`, `stop_radio`, `radio_channel_list`,
+`set_radio_status`) rather than the open API. **[app]**
 
 ---
 
@@ -280,7 +346,7 @@ One channel per call: `main` `headphone` `tg` `audio` `voice` `omni_in` `omni_ou
 |---|---|
 | `setPiano.php` | `quiet=` `voice=` `reverb_type=` `reverb_depth=` |
 | `setPlayFunc.php` | `left_hand=` `right_hand=` (part muting for practice) |
-| `setRcs.php` | `status=` `on` `sleep` `rlesson` `rlive` `to_maint_user` |
+| `setRcs.php` | `status=` `on` `sleep` `rlesson` `rlive` `to_maint_user` · and `reboot`, which restarts the piano: it answers 200, stops responding, and was back on the network 32 s later, twice **[live]**. The open API answers before the song database is ready, so give it another 20–30 s before loading anything |
 | `setSystem.php` | `lang=` `autooff_time=` `hp_vol_ctrl_status=` |
 | `setAudioIO.php` | `omni_in_type=` `omni_in_delay=` `omni_out_type=` `digital_out=` `piano_delay=` `sync_out_level=` |
 | `setMidiIO.php` | `midi_in_port=` `midi_out_port=` `midi_out_type=` `piano_rcv_ch=` `kbd_out_ch=` |
@@ -292,6 +358,7 @@ One channel per call: `main` `headphone` `tg` `audio` `voice` `omni_in` `omni_ou
 | `setReset.php` | `set_reset=` — ⚠️ a reset; do not fire speculatively |
 | `setRemoteLesson.php` / `setRemotelive.php` | `cmd=exit` |
 | `setPage.php` | `event=` (UI page tracking) |
+| `setMsgbox.php` | `type=exclusive&label=&msg=&wait=yes` — the web app raising its own "please wait" modal, which it expects the piano to clear |
 | `setRefreshDB.php` | none — reindexes the song database. Returns 200; indexing takes a few seconds **[live]** |
 
 `setGeneralXML.php` takes an `element=` naming the thing to change plus that element's own
@@ -334,7 +401,11 @@ crucially **`song_pfix` + `song_id`**, the only place the current selection's li
 reported), `ab_repeat`, `repeat`, `vol.headphone`, `mute`, `re_rec`, a full `piano` block
 (voice, reverb, metronome `met_*`, `key_motion`), `sbc` (headphone/USB/WLAN/LED/timer/
 auto-off), `system` (`master_tune`, `login_passcode`, `demo`), `msgbox` (modals the piano
-pushes at its client), `apictrl`, `radio`, `login`, `firmware`. **[live]**
+pushes at its client), `apictrl`, `radio` (§4), `login`, `firmware`. **[live]**
+
+Two of those hold things a client should not pass on: `login.username` is the account's email
+address, and `system.login_passcode` is what it says. Anything that reports this file — a bug
+report, a diagnostics download — should report its shape and not its contents.
 
 **`apictrl.update_window` stamps the library, not the state.** It is a millisecond timestamp
 on the piano's clock that moves when a reindex finishes, and nothing else seen so far moves
@@ -361,9 +432,13 @@ the master clock — the same reason a stopped audio song reports `seq.tempo` as
 MIDI song reports its scaling percentage. Album rows carry `coverart_path` under the HTTP
 root. **[live]**
 
-Album rows also carry `album_id`, `album_title` and `album_path`, and the ids and titles are
-the ones `get_album_list` reports — a PC Sharing Folder album is titled by its path on the
-share, and its `album_path` is that path under `FromToPC/`. That makes the database the fast
+Album rows also carry `album_id`, `album_title` and `album_path`, and the ids are the ones
+`get_album_list` reports. The titles agree where they are the user's own — a PC Sharing
+Folder album is titled by its path on the share in both, and its `album_path` is that path
+under `FromToPC/` — but not for the folders the firmware provides. A library's root album is
+`(Root)` in the database and `""` in the listing, and My Recordings' two are `Temporary
+Folder` and `Keep` in the database against `Recorded Songs` and `Kept Songs` in the listing.
+Join the two sources on the id. That makes the database the fast
 way to find a folder by name: on a share of 304 albums it was served in 0.3 s, where
 `get_album_list&group=pc_sharing_folder` took 1.8 s every time. The file is being rewritten
 for a moment during a reindex, and a read then can fail mid-body. **[live]**
@@ -405,6 +480,41 @@ None of these are inferable from the interface. All were found by driving a real
    reporting another; stop first.
 9. **Position resolution is ~1000 ms** and advances in real time during playback.
 10. **`volume_up_main` / `volume_down_main` step by 10.**
+11. **The sequencer drops what it is sent while it loads.** `load_song` answers at once; the
+    load itself then takes about two seconds — `load` first showed in `current_info` 0.7–1.1 s
+    after the command and cleared 1.3–2.0 s after it, for a plain MIDI file and an MP3-backed
+    song alike. A seek or a `play` sent in that window answers 200 and is lost: the right
+    song comes up, at the start, stopped. Sent after `load` had cleared, the same seek held
+    and the same `play` played. Note that for the first half second or more the state files
+    still show the state from *before* the load (§7.5), so "not `load`" straight after the
+    command does not mean "loaded".
+12. **The same goes for the second after `stop_radio`, and after `get_radio_channel_list`.**
+    Both send the sequencer through a `load` of their own, with the same deafness (§4).
+13. **Three reads that are not reads.** `get_radio_channel_list` stops the sequencer (§4),
+    `putNoteOn.php` plays a chord (§5), and `setRefreshDB.php` reassigns song ids. Everything
+    else spelled `get_*`, and the state files, are safe to poll.
+14. **The sequencer daemon can wedge, and only a reboot clears it.** The piano goes on
+    answering, and `load_song` still moves the selection — `song_pfix`, `song_id` and the
+    title all change — but the load never completes: `current_info` reports a `song_length`
+    of `0` (and sometimes `playback_status: load` for good), `seq.endtime` keeps the previous
+    song's length, and every seek and every `play` is a silent no-op. Nothing is locked
+    (`apictrl.exclusive_mode` is `no`), no modal need be up, and neither a reindex nor a
+    standby cycle recovers it. `setRcs.php?status=reboot` does (§5).
+
+    Seen four times on this unit: twice in August 2026 after ordinary playback, and twice in
+    one session of hardware testing in September. What sets it off is **not established**
+    (§9) — but both September incidents came during sequences that sent `stop` and
+    `load_song` a few tens of milliseconds apart, the second with nothing else going on
+    minutes after a clean reboot, while the same commands a second or more apart, many times
+    that day and through a full test run afterwards, never did it. `aiodisklavier` therefore
+    leaves a second between a `stop` and a `load_song`, sends nothing to a song that is still
+    loading, and checks a seek or a `play` once rather than repeating it. Pace your own
+    commands likewise.
+
+    A narrower casualty of the same session: the `Connecting...` modal (§4) was once left up
+    for good, blocking the piano's own interface, after a `play_radio` sent straight after a
+    `load_song` and then a `stop_radio` while it may still have been connecting. Starting a
+    channel, letting it connect, and stopping it cleared the modal.
 
 ### Errors — all confirmed HTTP 400 on the open API
 
@@ -546,11 +656,16 @@ security boundary — the same trust model as the HTTP API.
 Stated plainly rather than guessed at, because everything above is reproducible and these are
 not:
 
-- **The `my_songs` prefix.** That library was empty on this unit, so its one-letter prefix in
-  `master.json` was never observed.
-- **Whether radio blocks transport commands.** There is reason to think playback behaves
-  differently while a radio channel is playing, but this was not exercised and should be
-  treated as unknown.
+- **What wedges the sequencer** (§7.14). Rapid back-to-back commands are the suspect, on the
+  strength of two incidents; the two in August had no such excuse. Nor is it known whether a
+  stranded `Connecting...` modal comes from `stop_radio` during a connect, from `play_radio`
+  during a load, or from something else.
+- **Which other values `playback_status` takes.** `play`, `pause`, `load` and `radio` have
+  been seen. The sequencer also knows `record`, `ffs`, `frs`, `sync_play`, `nosong` and
+  others, and whether the open API passes any of them on was not tried.
+- **What `current_info` reports while the web app sits on the radio's channel list**
+  (`radio.status: channel`). Only the web app enters that state.
+- **Radio on any channel but the free one.** This account's subscription covered channel 1.
 - **Recording.** `record`, `rec_wait`, `audio_rec_wait` and `smf_audio_rec_wait` appear in the
   web app but were deliberately never fired.
 - **Value ranges** for most `/ctrl/` parameters. Only `set_volume_main` (0–100) was probed at
@@ -572,4 +687,11 @@ curl -s "http://$PIANO/api/1.0/get_song_list?group=built_in_songs"
 
 # Yamaha's own test page — drives the API live against your piano.
 open "http://$PIANO/ctrl/api_test.html"
+
+# What this library makes of your piano: read-only, silent, and made to be pasted into an
+# issue. It prints the shape of the state files, not their contents.
+python -m aiodisklavier "$PIANO"
 ```
+
+Everything marked **[live]** in §4's radio section and §7.11–14 can be reproduced the same
+way, but mind §7.14 first: leave a second between commands to the sequencer.
