@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-09-19
+
 ### Fixed
 
 - **A case-only rename no longer deletes a song when syncing with `prune`.** The piano's
@@ -231,7 +233,8 @@ These shaped the API and are documented in `docs/enspire-api.md`:
 - Restoring playback stops first, because `load_song` changes the sequencer's selection
   without halting what is currently sounding.
 
-[Unreleased]: https://github.com/reubenbijl/aiodisklavier/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/reubenbijl/aiodisklavier/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/reubenbijl/aiodisklavier/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/reubenbijl/aiodisklavier/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/reubenbijl/aiodisklavier/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/reubenbijl/aiodisklavier/compare/v0.1.1...v0.2.0
