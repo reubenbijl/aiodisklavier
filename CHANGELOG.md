@@ -52,6 +52,10 @@ with its evidence, in `docs/enspire-api.md`.
 - **`async_restore_playback` takes two to four seconds longer**, because it now does what it
   says. See "Fixed".
 - `PREFIX_TO_SONG_GROUP` is a read-only mapping.
+- **`pysmb>=1.2.7`**, up from 1.2. Earlier releases carry an invalid escape sequence in a
+  docstring, which Python reports when it compiles the module: a `SyntaxWarning` on first
+  import from 3.12, and an import error for anyone running with warnings as errors. Found
+  by the new lowest-dependencies CI job on its first run.
 
 ### Added
 
@@ -123,7 +127,7 @@ with its evidence, in `docs/enspire-api.md`.
   A precaution against the sequencer wedging, whose cause is not established — see
   `docs/enspire-api.md` §7.14.
 - `pytest-asyncio` is floored at 0.24, the first release to know the config option the suite
-  sets; 0.23 refused to start. Found by the new lowest-dependencies job.
+  sets — 0.23 refused to start — and `pytest` at the 8.2 that requires.
 - `LibraryAlbum`'s documentation claimed the database and the album listing agree on titles.
   They agree on ids; the firmware's own folders are titled differently by each.
 

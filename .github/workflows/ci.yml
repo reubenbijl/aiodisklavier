@@ -71,9 +71,12 @@ jobs:
           python-version: "3.11"
       # The lower bounds in pyproject.toml are claims too. Every other job installs the
       # newest release of everything, so nothing else would notice one going stale -- and
-      # one had: pytest-asyncio was floored a release below the config option the suite
-      # depends on. `lowest-direct` pins this package's own requirements to their floors
-      # and leaves their dependencies to resolve normally.
+      # two had. pytest-asyncio was floored a release below the config option the suite
+      # depends on, and pysmb below the first release that imports without a warning, which
+      # this job caught on its first run. `lowest-direct` pins this package's own
+      # requirements to their floors and leaves their dependencies to resolve normally.
+      # uv does not byte-compile on install, so every module is compiled on first import
+      # here -- which is what surfaces a compile-time warning that pip's install would hide.
       - run: pip install uv
       - run: uv pip install --system --resolution lowest-direct -e ".[test]"
       - run: uv pip list --system
