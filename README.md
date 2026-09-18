@@ -3,7 +3,9 @@
 Async Python client for the **Yamaha Disklavier ENSPIRE** local API — HTTP for control and
 state, SMB for getting your own music onto the instrument.
 
-Talks to the piano directly over your own network. Verified against firmware **5.24.00** on a Disklavier ENSPIRE PRO grand.
+Talks to the piano directly over your own network. Verified against firmware **5.24.00** on a
+Disklavier ENSPIRE PRO grand — one piano, which is the honest measure of it. If you have
+another, [your report](#reporting-from-another-piano) is the most useful thing you can send.
 
 > Not affiliated with, endorsed by, or sponsored by Yamaha Corporation. Yamaha, Disklavier
 > and ENSPIRE are trademarks of Yamaha Corporation, used here only to identify the hardware
@@ -55,9 +57,15 @@ Finding the piano is a plain SSDP `M-SEARCH` for `urn:schemas-upnp-org:device:Di
 | Voicing | `async_set_quiet_mode`, `async_set_repeat` |
 | Playback | `async_play_song`, `async_play_search`, `async_play_genre`, `async_play_album`, `async_play_playlist`, `async_play_playlist_item` |
 | Browsing | `async_get_songs`, `async_get_albums`, `async_get_songs_in_album`, `async_get_playlists`, `async_get_playlist_items` |
+| Song database | `async_get_song_db`, `async_lookup_song`, `async_search` |
 | Radio | `async_get_radio_channels`, `async_play_radio`, `async_stop_radio` |
 | Notifications | `async_notify`, `async_snapshot_playback`, `async_restore_playback`, `async_play_test_chord` |
 | Library | `async_refresh_library` |
+
+The song database is the piano's own (`/ctrl/song.json`): one fetch describes every song in
+every library, with what the listings leave out — format, composer, performer, length.
+`async_search` ranks titles across it and returns candidates, where the piano's own search
+can only play its single best guess.
 
 ## Firmware behaviours worth knowing
 
@@ -78,9 +86,29 @@ full reasoning, with provenance for every claim, is in
   trailing `\n\0`, which is stripped rather than retried.
 - **State lags a command.** Reading `current_info` straight after a `load_song` or reselect
   returns the *previous* song. Allow a short settle before trusting a post-command read.
-- **Radio's interaction with transport commands is not established.** There is reason to
-  think playback behaves differently while a radio channel is playing, but it has not been
-  exercised on hardware — treat transport during radio as unknown.
+- **The sequencer is deaf while it loads.** `load_song` answers at once and the load takes
+  about two seconds, during which a seek or a `play` answers HTTP 200 and is dropped.
+  `async_restore_playback` waits the load out and reads the position back; if you cue and
+  then seek or play yourself, wait until `playback_status` has left `LOAD`.
+- **Radio is a mode, and it takes the piano over.** While a channel plays, `play`, `pause`,
+  `stop`, `next_song` and every `load_*` and `play_*` answer HTTP 200 and are ignored, so
+  check `CurrentInfo.is_radio` before trusting a transport command. `current_info` goes
+  blank; the programme is in `MasterState.radio_channel` / `radio_title`. Only
+  `async_stop_radio` ends it, and `async_notify` does that for you and puts the channel back
+  afterwards. A paused position does not survive a visit to the radio.
+- **Reading the radio channel list stops the music.** `get_radio_channel_list` looks like a
+  read and stops the sequencer: a playing song falls silent, a paused one rewinds. So
+  `async_get_radio_channels` caches after its first read, and `async_search` leaves radio
+  out unless you pass `include_radio=True`. Read the list once, at a quiet moment.
+- **A status can be `None`.** `power_status`, `quiet_status` and `playback_status` parse to
+  `None`, with one warning logged, for a value this library has no name for — never to a
+  plausible guess. `quiet_status` reads `HEADPHONE` while headphones are plugged in, and
+  `playback_status` has `LOAD` and `RADIO` as well as the two you would expect.
+- **The sequencer daemon can wedge, and only a reboot clears it.** The piano keeps answering
+  and keeps accepting selections, but no song finishes loading and nothing plays. What sets
+  it off is not established; rapid back-to-back commands are the suspect, so this library
+  paces the compound operations it performs, and you should pace yours. See
+  [docs/enspire-api.md §7.14](docs/enspire-api.md).
 - **`async_play_test_chord` makes a sound** — a C major triad for one second. It goes to the
   MIDI daemon rather than the sequencer, so it will not disturb a loaded song.
 
@@ -112,6 +140,7 @@ if result.changed:
 
 | Area | Methods |
 |---|---|
+| Session | `async_connect`, `async_close` — or use it as an async context manager |
 | Browsing | `async_list`, `async_walk`, `async_stat`, `async_exists`, `async_list_shares` |
 | Writing | `async_upload`, `async_upload_bytes`, `async_makedirs`, `async_rename` |
 | Reading | `async_download`, `async_download_bytes` |
@@ -142,6 +171,11 @@ Things worth knowing about the share, all covered in
   piano part with the band missing, silently. `PLAYABLE_SUFFIXES` includes audio for exactly
   this reason, and `async_sync_directory` warns if it sends a MIDI whose companion was
   filtered out.
+- **Names on the share ignore case.** Uploading `Clair de Lune.mid` over a stored
+  `clair de lune.mid` overwrites it under its old name. `async_sync_directory` therefore
+  matches remote paths case-insensitively, so a file renamed only in its capitalisation keeps
+  the name the share already has — rather than being re-sent and then pruned under the old
+  name, which would delete the only copy.
 - **Never copy to the share from macOS directly.** Finder leaves a `._` AppleDouble stub
   beside every file, the piano indexes those as songs in their own right, and loading one
   silently resets the piano to the first built-in song. `async_sync_directory` excludes them
@@ -182,6 +216,65 @@ refuses paths containing `..` or control characters before they reach the wire, 
 device- or config-supplied path cannot be steered outside the share, and it never follows
 a name the server invents. Treat write access to the share as equivalent to LAN access.
 
+## Stability
+
+The version is still below 1.0, deliberately: the last incompatible changes are being made
+now, while they are cheap, so that they need not be made later — the
+[changelog](CHANGELOG.md) lists them. From 1.0.0 the project follows
+[Semantic Versioning](https://semver.org), and this is what the number will and will not
+promise.
+
+**What is covered.** The names in `aiodisklavier.__all__`, imported from `aiodisklavier`
+itself: their signatures, the fields of the models, the members of the enumerations, and the
+exception each failure raises. Within a major version those only grow. Models are
+keyword-only and new fields arrive with defaults, so code that constructs one — a test
+fixture, say — keeps working.
+
+**What is not.**
+
+- *Submodule paths.* `aiodisklavier.client`, `.const`, `.models`, `.share` and `.exceptions`
+  are an arrangement of files, and may be rearranged. Import from the top level. Anything
+  spelled with a leading underscore is private, `python -m aiodisklavier`'s output included.
+- *The values of tuning constants.* `DEFAULT_TIMEOUT`, `MAX_RESPONSE_BYTES` and their kind
+  keep their names and may change their numbers in a minor release, as may the settles and
+  polling intervals behind `async_notify` and `async_restore_playback`.
+- *New enumeration members.* A firmware state this library learns to name stops parsing to
+  `None` and starts parsing to a new member, in a minor release. Write your `match` with a
+  default arm.
+- *The piano.* Features built on the internal `/ctrl/` endpoints — seeking, repeat, the
+  extended state, the song database, reindexing, restoring a position — depend on an
+  interface Yamaha has never published or versioned. They are best-effort: a firmware update
+  can break them, and a fix for that is a patch release, not a breach of this policy.
+
+**What 1.0 will claim**, and no more: that the API above is stable, and that it was verified
+on an ENSPIRE PRO grand running 5.24.00. Not that it has been tried on other models, regions
+or firmware — it has not.
+
+**Deprecation.** Something on its way out keeps working, and warns with
+`DeprecationWarning`, for at least one minor release before it is removed in the next major.
+
+**Python.** Every version CI tests, currently 3.11 to 3.14. Dropping one that has reached its
+end of life is a minor release.
+
+## Reporting from another piano
+
+Everything here was learned from one instrument, so what yours says is news. One command
+describes it, read-only and silent:
+
+```bash
+python -m aiodisklavier 192.168.1.50
+```
+
+It prints which fields your piano reports and which values its status fields take, flagging
+anything this library does not recognise, and it is made to be pasted into
+[an issue](https://github.com/reubenbijl/aiodisklavier/issues/new/choose) as it stands. It
+reports shapes rather than contents: no song titles, file names, ids or addresses, and
+nothing from the account and passcode fields the piano keeps in the same state file. It
+never asks for the radio channel list, so it will not interrupt anything that is playing.
+
+The [Home Assistant integration](https://github.com/reubenbijl/ha-disklavier) is built on
+this library; a problem you meet there that traces back to the piano belongs here too.
+
 ## Development
 
 ```bash
@@ -194,6 +287,16 @@ Tests run against a real `aiohttp` test server that imitates the piano, so no ha
 needed and the suite does not depend on any mocking library's grip on aiohttp internals.
 Several tests encode behaviour found only on real hardware — those are commented as such,
 because they look arbitrary otherwise.
+
+A fake can only repeat what one piano once did, so there is also an opt-in suite that runs
+the same library against a real one — read-only unless you ask for more:
+
+```bash
+DISKLAVIER_HOST=192.168.1.50 .venv/bin/python -m pytest -m hardware
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for its three levels, and for the caution that goes
+with the third.
 
 ## Licence
 

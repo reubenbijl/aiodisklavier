@@ -33,14 +33,22 @@ jobs:
         run: mypy aiodisklavier examples
 
   test:
-    name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: Test (Python ${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # Must match the Programming Language classifiers in pyproject.toml: claiming
         # support for a version CI never exercises is a promise the package cannot keep.
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+        os: [ubuntu-latest]
+        # The same rule, for "Operating System :: OS Independent". One macOS leg rather
+        # than a full matrix: what differs between platforms here is sockets and paths,
+        # not Python versions -- and it has differed. 0.2.0 shipped a positional-argument
+        # slip in the SMB connect that macOS hid and Linux did not.
+        include:
+          - python-version: "3.13"
+            os: macos-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -49,6 +57,26 @@ jobs:
           cache: pip
       - run: pip install -e ".[test]"
       # Coverage is gated at 100% in pyproject.toml, so this fails on any gap.
+      - run: pytest --cov --cov-report=term-missing
+
+  floor:
+    name: Test (lowest supported dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          # The oldest Python the package supports: the oldest dependencies have no
+          # wheels for the newest ones.
+          python-version: "3.11"
+      # The lower bounds in pyproject.toml are claims too. Every other job installs the
+      # newest release of everything, so nothing else would notice one going stale -- and
+      # one had: pytest-asyncio was floored a release below the config option the suite
+      # depends on. `lowest-direct` pins this package's own requirements to their floors
+      # and leaves their dependencies to resolve normally.
+      - run: pip install uv
+      - run: uv pip install --system --resolution lowest-direct -e ".[test]"
+      - run: uv pip list --system
       - run: pytest --cov --cov-report=term-missing
 
   build:
