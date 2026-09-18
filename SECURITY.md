@@ -34,9 +34,9 @@ vulnerability**. That opens a private advisory visible only to you and the maint
 If that option is not offered, open an ordinary issue that says only that you have a security
 report to make — no details — and you will be contacted to arrange a private channel.
 
-You should hear back within a week. This is a small project maintained in spare time, so a
-fix may take longer than that, but you will be told what is happening, and credited in the
-release notes unless you would rather not be.
+This is a small project maintained in spare time, so there is no promised response time: a
+reply comes when it can, and a fix when one is ready. Reports are read, though, and anyone
+whose report leads to a fix is credited in the release notes unless they would rather not be.
 
 ## Supported versions
 
