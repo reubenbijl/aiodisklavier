@@ -17,13 +17,7 @@ from aiodisklavier import (
 )
 from aiodisklavier.client import _match_score
 
-from .conftest import SONG_DB_PAYLOAD, FakePiano, dumps
-
-
-def _ok(**payload: object) -> str:
-    """Build the firmware's success envelope."""
-    return dumps({"status": "ok", "error_info": "", **payload})
-
+from .conftest import SONG_DB_PAYLOAD, FakePiano, dumps, ok_envelope
 
 # ----------------------------------------------------------------------
 # Database fetch and parsing
@@ -122,6 +116,23 @@ async def test_lookup_miss_refreshes_once(
         == fetches + 1
     )
 
+    # Asked again -- a poller whose loaded song was deleted asks every few seconds --
+    # the remembered miss answers without another download.
+    assert await piano.async_lookup_song("r", 12345) is None
+    assert await piano.async_lookup_song("r", 12345) is None
+    assert (
+        sum(1 for r in fake_piano.requests if r.path == "/ctrl/song.json")
+        == fetches + 1
+    )
+
+    # Once something else re-reads the database, the missing key gets one more look.
+    await piano.async_get_song_db(refresh=True)
+    assert await piano.async_lookup_song("r", 12345) is None
+    assert (
+        sum(1 for r in fake_piano.requests if r.path == "/ctrl/song.json")
+        == fetches + 3
+    )
+
 
 async def test_song_db_larger_than_the_general_ceiling_is_accepted(
     piano: Disklavier, fake_piano: FakePiano
@@ -183,7 +194,7 @@ async def test_search_ranks_and_spans_kinds(
     piano: Disklavier, fake_piano: FakePiano
 ) -> None:
     """Search covers songs, playlists and radio, best matches first."""
-    fake_piano.command_body = _ok(
+    fake_piano.command_body = ok_envelope(
         playlist_list=[
             {"playlist_id": 3, "playlist_title": "Clair de lune covers"},
             # And one that does not match, which must simply not appear.
@@ -227,7 +238,7 @@ async def test_search_without_radio_still_answers(
     piano: Disklavier, fake_piano: FakePiano
 ) -> None:
     """A region without DisklavierRadio just contributes no radio results."""
-    fake_piano.command_body = _ok(playlist_list=[])
+    fake_piano.command_body = ok_envelope(playlist_list=[])
     fake_piano.command_body_for = {
         "get_radio_channel_list": dumps(
             {"status": "error", "error_info": "not available", "channel_list": []}
@@ -243,7 +254,7 @@ async def test_search_respects_the_limit(
     piano: Disklavier, fake_piano: FakePiano
 ) -> None:
     """The limit truncates after ranking."""
-    fake_piano.command_body = _ok(playlist_list=[], channel_list=[])
+    fake_piano.command_body = ok_envelope(playlist_list=[], channel_list=[])
 
     results = await piano.async_search("Clair de lune", limit=1)
     assert len(results) == 1

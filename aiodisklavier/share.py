@@ -1095,9 +1095,11 @@ class DisklavierShare:
         Two things this deliberately does not do. It does not coordinate with *another*
         sync running on the same client: the lock serialises individual operations, not
         whole runs, so two overlapping syncs of the same tree each plan against the state
-        they found and both transfer everything. And it compares remote paths exactly, so a
-        file renamed only in its capitalisation is seen as new and sent again -- harmless on
-        a case-insensitive server, which simply overwrites, but it will not settle down.
+        they found and both transfer everything. And it matches remote paths without regard
+        to case, as the share itself does, so a file or folder renamed only in its
+        capitalisation keeps the name the share already has -- rather than being sent again,
+        which overwrites the stored copy under its old name, and then pruned under that old
+        name, which would delete the only copy.
         """
         root = Path(local_dir)
         target = _clean(remote_dir)
@@ -1339,27 +1341,30 @@ def _plan_sync(
     # reads this set too, so it must describe the finished state rather than only the work
     # -- listing just the missing ones would have prune delete the directories that exist.
     needed: set[str] = {target} if target else set()
+    # The share matches names without regard to case, so the plan does too: see the note on
+    # capitalisation in DisklavierShare.async_sync_directory.
+    folded = {path.casefold(): entry for path, entry in remote.items()}
 
     for local in files:
         destination = _join(target, local.relative)
         wanted.add(destination)
         needed.update(_parents(destination))
-        if _needs_upload(local, remote.get(destination)):
+        if _needs_upload(local, folded.get(destination.casefold())):
             plan.uploads.append((local, destination))
         else:
             plan.skipped.append(destination)
 
     # Shallowest first, so every parent exists before its children.
     plan.directories = sorted(
-        (path for path in needed if path not in remote),
+        (path for path in needed if path.casefold() not in folded),
         key=lambda path: (path.count("/"), path),
     )
 
     if prune:
-        keep = wanted | needed
+        keep = {path.casefold() for path in wanted | needed}
         # Deepest first, so a directory is empty by the time it is removed.
         plan.removals = sorted(
-            (entry for path, entry in remote.items() if path not in keep),
+            (entry for path, entry in remote.items() if path.casefold() not in keep),
             key=lambda entry: (-entry.path.count("/"), entry.path),
         )
 

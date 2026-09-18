@@ -150,6 +150,8 @@ class Disklavier:
         self._timeout = aiohttp.ClientTimeout(total=timeout)
         self._base = URL.build(scheme="http", host=host, port=port)
         self._song_db: SongDatabase | None = None
+        #: Song keys a fresh read of the database still lacked; see async_lookup_song.
+        self._song_db_misses: set[str] = set()
 
     @property
     def host(self) -> str:
@@ -650,6 +652,7 @@ class Disklavier:
         if refresh or self._song_db is None:
             data = await self._get_json(PATH_CTRL_SONG_DB, max_bytes=MAX_SONG_DB_BYTES)
             self._song_db = SongDatabase.from_json(data)
+            self._song_db_misses.clear()
         return self._song_db
 
     async def async_lookup_song(self, prefix: str, song_id: int) -> LibrarySong | None:
@@ -659,13 +662,19 @@ class Disklavier:
         :attr:`~aiodisklavier.models.MasterState.song_prefix`); this joins that pair
         against the song database. A miss refreshes the cached database once before
         giving up, because a fresh recording or a share re-index mints keys an older
-        cache has never seen.
+        cache has never seen. A key the fresh database still lacks is remembered until
+        the database is next read, so a caller polling for a song the piano no longer
+        has -- the loaded song deleted from the share, say -- does not download the
+        whole database on every poll.
         """
         db = await self.async_get_song_db()
         song = db.lookup(prefix, song_id)
-        if song is None:
+        key = f"{prefix}{song_id}"
+        if song is None and key not in self._song_db_misses:
             db = await self.async_get_song_db(refresh=True)
             song = db.lookup(prefix, song_id)
+            if song is None:
+                self._song_db_misses.add(key)
         return song
 
     async def async_search(self, query: str, *, limit: int = 20) -> list[SearchResult]:

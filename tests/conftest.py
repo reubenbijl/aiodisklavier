@@ -181,6 +181,11 @@ def dumps(payload: object) -> str:
     return json.dumps(payload)
 
 
+def ok_envelope(**payload: object) -> str:
+    """Build the firmware's success envelope around a payload."""
+    return dumps({"status": "ok", "error_info": "", **payload})
+
+
 @dataclass
 class Request:
     """One request the fake piano received."""

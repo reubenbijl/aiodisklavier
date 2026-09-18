@@ -12,13 +12,7 @@ from aiodisklavier import (
     SongGroup,
 )
 
-from .conftest import FakePiano, dumps
-
-
-def _ok(**payload: object) -> str:
-    """Build the firmware's success envelope."""
-    return dumps({"status": "ok", "error_info": "", **payload})
-
+from .conftest import FakePiano, ok_envelope
 
 # ----------------------------------------------------------------------
 # Listing
@@ -27,7 +21,7 @@ def _ok(**payload: object) -> str:
 
 async def test_get_albums(piano: Disklavier, fake_piano: FakePiano) -> None:
     """Albums are parsed from album_list."""
-    fake_piano.command_body = _ok(
+    fake_piano.command_body = ok_envelope(
         album_list=[{"album_id": 1, "album_title": "Pop"}],
     )
     albums = await piano.async_get_albums(SongGroup.BUILT_IN_SONGS)
@@ -39,7 +33,7 @@ async def test_get_albums(piano: Disklavier, fake_piano: FakePiano) -> None:
 
 async def test_get_songs_in_album(piano: Disklavier, fake_piano: FakePiano) -> None:
     """Songs within an album are parsed."""
-    fake_piano.command_body = _ok(
+    fake_piano.command_body = ok_envelope(
         song_list=[{"song_id": 44, "song_title": "You're Welcome 2"}],
     )
     songs = await piano.async_get_songs_in_album(1, SongGroup.DOWNLOADED_SONGS)
@@ -50,7 +44,7 @@ async def test_get_songs_in_album(piano: Disklavier, fake_piano: FakePiano) -> N
 
 async def test_get_playlist_items(piano: Disklavier, fake_piano: FakePiano) -> None:
     """Playlist contents are parsed."""
-    fake_piano.command_body = _ok(
+    fake_piano.command_body = ok_envelope(
         item_list=[{"item_id": 24, "song_title": "Silent Night"}],
     )
     items = await piano.async_get_playlist_items(1, PlaylistGroup.PLAYLISTS)
@@ -67,7 +61,7 @@ async def test_list_without_a_recognised_key_is_empty(
     The firmware switches between ``song_list`` and ``item_list`` by group; anything else
     is treated as an empty result rather than a crash.
     """
-    fake_piano.command_body = _ok(something_else=[])
+    fake_piano.command_body = ok_envelope(something_else=[])
     assert await piano.async_get_songs(SongGroup.BUILT_IN_SONGS) == []
 
 

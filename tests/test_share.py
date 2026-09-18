@@ -864,6 +864,27 @@ async def test_sync_prune_keeps_directories_it_still_needs(
     assert "ImpromptuApp/Chopin" in smb_server.paths
 
 
+async def test_sync_prune_matches_names_without_regard_to_case(
+    share, smb_server, catalogue
+):
+    """A folder or file renamed only in its capitalisation is neither resent nor pruned.
+
+    The piano's share matches names case-insensitively: an upload to ``CHOPIN/Ballade.mid``
+    overwrites the stored ``Chopin/Ballade.mid`` under its old name, and pruning the old
+    spelling afterwards would delete the only copy.
+    """
+    await share.async_sync_directory(catalogue, "ImpromptuApp")
+    (catalogue / "Chopin").rename(catalogue / "CHOPIN")
+    (catalogue / "CHOPIN" / "Ballade.mid").rename(catalogue / "CHOPIN" / "BALLADE.mid")
+
+    result = await share.async_sync_directory(catalogue, "ImpromptuApp", prune=True)
+
+    assert result.uploaded == ()
+    assert result.directories == ()
+    assert result.removed == ()
+    assert "ImpromptuApp/Chopin/Ballade.mid" in smb_server.paths
+
+
 async def test_sync_stops_at_the_first_failure_by_default(share, smb_server, catalogue):
     """Silence about a failed transfer would be the worst of both behaviours."""
     smb_server.fail_on[("store", "ImpromptuApp/Chopin/Ballade.mid")] = smb_failure(

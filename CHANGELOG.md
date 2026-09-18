@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A case-only rename no longer deletes a song when syncing with `prune`.** The piano's
+  share matches names without regard to case, so uploading `Clair de Lune.mid` overwrote
+  the stored `clair de lune.mid` under its old name, and the prune then deleted that name —
+  the only copy. `async_sync_directory` now matches remote paths case-insensitively, as the
+  share does, so the renamed file or folder simply keeps the name the share already has.
+- **`async_lookup_song` no longer re-downloads the song database for a key that stays
+  missing.** A miss still refreshes once; a key the fresh database also lacks is remembered
+  until the database is next read, so polling for a loaded song that was deleted from the
+  share no longer fetches ~1 MB every time.
+- `examples/sync_library.py` now prunes an emptied source folder under `--prune` instead of
+  skipping it, ignores AppleDouble stubs when deciding a folder has nothing to sync, and
+  exits non-zero when any file fails to copy rather than reporting everything current.
+
 ## [0.2.2] — 2026-09-13
 
 ### Added

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fnmatch
 import logging
 import sys
 import time
@@ -43,6 +44,7 @@ from pathlib import Path
 import aiohttp
 
 from aiodisklavier import (
+    DEFAULT_EXCLUDES,
     PLAYABLE_SUFFIXES,
     Disklavier,
     DisklavierError,
@@ -115,10 +117,16 @@ def has_playable(directory: Path) -> bool:
     """Whether a directory holds anything the piano could play.
 
     Checked before syncing so that a source directory of build scripts or notes does not
-    leave an empty folder behind on the share.
+    leave an empty folder behind on the share. It skips what the sync itself excludes, so a
+    folder holding only AppleDouble stubs counts as empty.
     """
     return any(
         path.suffix.casefold() in PLAYABLE_SUFFIXES
+        and not any(
+            fnmatch.fnmatchcase(part.casefold(), pattern.casefold())
+            for part in path.relative_to(directory).parts
+            for pattern in DEFAULT_EXCLUDES
+        )
         for path in directory.rglob("*")
         if path.is_file()
     )
@@ -162,13 +170,16 @@ async def main() -> int:
 
     report = make_reporter()
     changed = False
+    failed = 0
     try:
         async with DisklavierShare(args.host) as share:
             for source, destination in jobs:
                 if not source.is_dir():
                     print(f"skipping missing {source}", file=sys.stderr)
                     continue
-                if not has_playable(source):
+                # Under --prune an emptied folder is exactly what should be mirrored:
+                # the end of a review batch leaves to-review empty.
+                if not args.prune and not has_playable(source):
                     print(f"skipping {source}: nothing playable in it")
                     continue
                 print(f"\n{source} -> {destination or '<share root>'}")
@@ -183,11 +194,16 @@ async def main() -> int:
                 )
                 summarise("  " + source.name, result)
                 changed = changed or result.changed
+                failed += len(result.failed)
 
         if args.dry_run:
             print("\nDry run: nothing was changed.")
         elif not changed:
-            print("\nEverything was already current.")
+            print(
+                "\nNothing was copied."
+                if failed
+                else "\nEverything was already current."
+            )
         elif args.no_reindex:
             print("\nSkipped the reindex; the piano will not list the new files yet.")
         else:
@@ -200,6 +216,9 @@ async def main() -> int:
             print("resolve songs by title rather than reusing an id from before.")
     except DisklavierError as err:
         print(f"error: {err}", file=sys.stderr)
+        return 1
+    if failed:
+        print(f"\n{failed} file(s) failed to copy; see above.", file=sys.stderr)
         return 1
     return 0
 
