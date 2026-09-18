@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-19
+
 The last incompatible changes before 1.0, made now because they only get more expensive, and
 the fixes from a morning spent finding out what the piano really does with a radio, a
 notification and a restore. Several of these change behaviour a caller may be relying on —
@@ -379,7 +381,8 @@ These shaped the API and are documented in `docs/enspire-api.md`:
 - Restoring playback stops first, because `load_song` changes the sequencer's selection
   without halting what is currently sounding.
 
-[Unreleased]: https://github.com/reubenbijl/aiodisklavier/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/reubenbijl/aiodisklavier/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/reubenbijl/aiodisklavier/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/reubenbijl/aiodisklavier/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/reubenbijl/aiodisklavier/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/reubenbijl/aiodisklavier/compare/v0.2.0...v0.2.1
