@@ -1,0 +1,10 @@
+blank_issues_enabled: true
+contact_links:
+  - name: A problem in Home Assistant
+    url: https://github.com/reubenbijl/ha-disklavier/issues
+    about: >-
+      Entities, the config flow, the media browser. If it turns out to be the piano or this
+      library, it will be moved here.
+  - name: A security vulnerability
+    url: https://github.com/reubenbijl/aiodisklavier/security/policy
+    about: Please report these privately. The security policy says how.

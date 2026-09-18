@@ -8,7 +8,7 @@ name = "aiodisklavier"
 # Single-sourced from aiodisklavier.__version__, so the tag, the package and the
 # PyPI release can never disagree.
 dynamic = ["version"]
-description = "Async client for the Yamaha Disklavier ENSPIRE local HTTP API"
+description = "Async client for the Yamaha Disklavier ENSPIRE: its local HTTP API, and the SMB share that gets music onto it"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -16,6 +16,9 @@ license-files = ["LICENSE"]
 authors = [{ name = "Reuben Bijl" }]
 keywords = ["yamaha", "disklavier", "enspire", "piano", "home-assistant"]
 classifiers = [
+  # Becomes "5 - Production/Stable" in the commit that sets __version__ to 1.0.0, and not
+  # before: the README's Stability section says what 1.0 claims, and a 0.x release carrying
+  # the classifier would be making that claim early.
   "Development Status :: 4 - Beta",
   "Framework :: AsyncIO",
   "Intended Audience :: Developers",
@@ -38,7 +41,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8", "pytest-asyncio>=0.23", "pytest-cov>=5"]
+# 0.24 is the first pytest-asyncio to know `asyncio_default_fixture_loop_scope`, which is set
+# below; under --strict-config an older one refuses to start. CI's floor job checks this.
+test = ["pytest>=8", "pytest-asyncio>=0.24", "pytest-cov>=5"]
 lint = ["ruff>=0.6", "mypy>=1.11"]
 dev = ["aiodisklavier[test,lint]"]
 
@@ -65,6 +70,11 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 addopts = "--strict-markers --strict-config"
+markers = [
+  # Opt-in, and skipped unless DISKLAVIER_HOST is set: see tests/hardware/conftest.py.
+  "hardware: runs against a real piano",
+  "needs(level): the DISKLAVIER_HARDWARE level a hardware test requires",
+]
 # Warnings are failures. A DeprecationWarning out of aiohttp is the earliest signal that
 # a future release will break this library, and it is worth hearing before users do.
 filterwarnings = ["error"]

@@ -1,0 +1,67 @@
+name: Report from another piano
+description: >-
+  Tell us what your Disklavier says. This library was written against a single instrument,
+  so a report from any other model, region or firmware is news — even when everything works.
+title: "Piano report: <model> <piano type>, firmware <version>"
+labels: ["piano report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. One command describes your piano — read-only, silent, and safe to run while
+        something is playing:
+
+        ```
+        pip install --upgrade aiodisklavier
+        python -m aiodisklavier <the piano's IP address>
+        ```
+
+        It reports which fields your piano sends and which values its status fields take. It
+        prints **no** song titles, file names, ids or addresses, and nothing from the account
+        and passcode fields the piano keeps in the same file — but do read it through before
+        posting, as you would anything.
+  - type: textarea
+    id: probe
+    attributes:
+      label: Output of `python -m aiodisklavier`
+      description: Paste all of it. Lines marked NOT RECOGNISED or "could not read" are the interesting ones.
+      render: markdown
+    validations:
+      required: true
+  - type: input
+    id: instrument
+    attributes:
+      label: The instrument
+      description: Model and type as you know them, and roughly how old.
+      placeholder: "ENSPIRE ST upright, bought 2019"
+    validations:
+      required: true
+  - type: dropdown
+    id: works
+    attributes:
+      label: Does the library work with it?
+      options:
+        - "Yes, everything I have tried"
+        - "Mostly — details below"
+        - "No — details below"
+        - "I have only run the report"
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Anything that behaves differently
+      description: >-
+        What you called, what you expected, what the piano did. If your piano has a passcode
+        set, or has no silent system, or no DisklavierRadio, say so — none of those could be
+        tried on the reference unit.
+  - type: checkboxes
+    id: hardware-suite
+    attributes:
+      label: The hardware test suite (optional)
+      description: >-
+        From a checkout, `DISKLAVIER_HOST=<ip> pytest -m hardware` runs read-only checks
+        against your piano. Paste any failures above.
+      options:
+        - label: I ran it, and it passed
+        - label: I ran it, and something failed
